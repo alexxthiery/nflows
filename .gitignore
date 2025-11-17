@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# do not include the directory notebooks_tests
+notebooks_tests/
+
 # C extensions
 *.so
 
