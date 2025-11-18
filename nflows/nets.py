@@ -83,6 +83,12 @@ def init_mlp(
     Returns:
       mlp: A Flax MLP module (definition only, no params inside).
       params: A PyTree of parameters for this MLP (suitable for mlp.apply).
+
+    Notes:
+      The final linear layer ("dense_out") is explicitly zero-initialized
+      (kernel and bias set to zero). This makes the initial output of the
+      conditioner identically zero, so any flow that interprets the output
+      as shift/log_scale starts exactly at the identity transform.
     """
 
     mlp = MLP(
@@ -95,6 +101,21 @@ def init_mlp(
     dummy_x = jnp.zeros((B, in_dim), dtype=jnp.float32)
     variables = mlp.init(key, dummy_x)
 
-    # We only keep the "params" collection. No batch_stats etc here.
-    params = variables.get("params", {})
+    # Flax returns a FrozenDict for "params". We copy it to a mutable dict so
+    # we can override the final layer weights and bias.
+    raw_params = variables.get("params", {})
+    params = dict(raw_params)  # shallow copy of top-level mapping
+
+    if "dense_out" not in params:
+        raise KeyError(
+            "init_mlp expected a 'dense_out' parameter collection in the MLP; "
+            "check the MLP implementation if this error occurs."
+        )
+
+    # Zero-initialize final layer: kernel and bias.
+    dense_out = dict(params["dense_out"])
+    dense_out["kernel"] = jnp.zeros_like(dense_out["kernel"])
+    dense_out["bias"] = jnp.zeros_like(dense_out["bias"])
+    params["dense_out"] = dense_out
+
     return mlp, params

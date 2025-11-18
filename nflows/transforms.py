@@ -42,6 +42,12 @@ class AffineCoupling:
 
     All operations act along the last dimension. The mask must be one-dimensional
     with the same length as the feature dimension.
+    
+    Note:
+    In this implementation, the conditioner network is typically initialized
+    such that its output is identically zero at initialization. In that case,
+    shift = 0 and log_scale = 0, so this layer is exactly the identity map
+    at the start of training.
     """
     mask: Array          # shape (dim,), values 0 or 1
     conditioner: MLP     # Flax MLP module (definition, no params inside)
