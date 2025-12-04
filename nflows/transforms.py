@@ -4,11 +4,168 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, List, Sequence, Tuple
 
+import jax
 import jax.numpy as jnp
+import jax.scipy.linalg as jsp
 
 from .nets import MLP, Array
 
+# ===================================================================
+# Linear Transform with LU-style parameterization
+# ===================================================================
+@dataclass
+class LinearTransform:
+    """
+    Global linear transform with LU-style parameterization.
 
+    We parameterize an invertible matrix W ∈ R^{dim×dim} as:
+
+      L = tril(lower_raw, k = -1) + I        (unit-diagonal lower)
+      U = triu(upper_raw, k = 1)             (zero diagonal upper)
+      s = exp(log_diag)                      (positive diagonal entries)
+      T = U + diag(s)                        (upper-triangular)
+      W = L @ T
+
+    For a column vector u, the forward map is:
+
+      a = T @ u
+      u' = L @ a
+
+    For batched row-vectors x with shape (..., dim), we flatten batch
+    dimensions and apply this to the last dimension.
+
+    The Jacobian of the forward map y = x W^T has determinant det(W), and
+
+      log |det W| = sum(log_diag).
+
+    Inverse uses triangular solves:
+
+      L a = u'      (forward substitution, unit diagonal)
+      T u = a       (back substitution)
+
+    Parameters (per block):
+      params["lower"]:    unconstrained raw lower-tri part, shape (dim, dim)
+      params["upper"]:    unconstrained raw upper-tri part, shape (dim, dim)
+      params["log_diag"]: diagonal log-scales, shape (dim,)
+
+    This yields O(dim^2) apply / inverse and O(dim) log-det, without any
+    repeated matrix factorizations inside the forward pass.
+    """
+    dim: int
+
+    def _reconstruct_L_U_s(self, params: Any) -> Tuple[Array, Array, Array]:
+        try:
+            lower_raw = jnp.asarray(params["lower"])
+            upper_raw = jnp.asarray(params["upper"])
+            log_diag = jnp.asarray(params["log_diag"])
+        except Exception as e:
+            raise KeyError(
+                "LinearTransform: params must contain 'lower', 'upper', 'log_diag'"
+            ) from e
+
+        if lower_raw.shape != (self.dim, self.dim):
+            raise ValueError(
+                f"LinearTransform: lower must have shape ({self.dim}, {self.dim}), "
+                f"got {lower_raw.shape}"
+            )
+        if upper_raw.shape != (self.dim, self.dim):
+            raise ValueError(
+                f"LinearTransform: upper must have shape ({self.dim}, {self.dim}), "
+                f"got {upper_raw.shape}"
+            )
+        if log_diag.shape != (self.dim,):
+            raise ValueError(
+                f"LinearTransform: log_diag must have shape ({self.dim},), "
+                f"got {log_diag.shape}"
+            )
+
+        L = jnp.tril(lower_raw, k=-1) + jnp.eye(self.dim, dtype=lower_raw.dtype)
+        U = jnp.triu(upper_raw, k=1)
+        s = jnp.exp(log_diag)
+        return L, U, s
+
+    def forward(self, params: Any, x: Array) -> Tuple[Array, Array]:
+        """
+        Forward map: x -> y, returning (y, log_det_forward).
+
+        Arguments:
+          params: PyTree with leaves 'lower', 'upper', 'log_diag'.
+          x: input tensor of shape (..., dim).
+
+        Returns:
+          y: transformed tensor of shape (..., dim).
+          log_det: log |det ∂y/∂x| = sum(log_diag), shape x.shape[:-1].
+        """
+        if x.shape[-1] != self.dim:
+            raise ValueError(
+                f"LinearTransform: expected input last dim {self.dim}, "
+                f"got {x.shape[-1]}"
+            )
+
+        L, U, s = self._reconstruct_L_U_s(params)
+        T = U + jnp.diag(s)
+
+        # Flatten batch dims for simpler linear algebra.
+        batch_shape = x.shape[:-1]
+        x_flat = x.reshape((-1, self.dim))  # (B, dim)
+        u = x_flat.T                        # (dim, B)
+
+        # Column-style forward: u' = L @ (T @ u)
+        a = T @ u
+        u_prime = L @ a
+        y_flat = u_prime.T                  # (B, dim)
+        y = y_flat.reshape(batch_shape + (self.dim,))
+
+        # log |det W| = sum(log_diag)
+        log_det_scalar = jnp.sum(jnp.log(s))  # or equivalently jnp.sum(log_diag)
+        log_det_forward = jnp.broadcast_to(log_det_scalar, batch_shape)
+        return y, log_det_forward
+
+    def inverse(self, params: Any, y: Array) -> Tuple[Array, Array]:
+        """
+        Inverse map: y -> x, returning (x, log_det_inverse).
+
+        Arguments:
+          params: PyTree with leaves 'lower', 'upper', 'log_diag'.
+          y: input tensor of shape (..., dim).
+
+        Returns:
+          x: inverse-transformed tensor of shape (..., dim).
+          log_det: log |det ∂x/∂y| = -sum(log_diag), shape y.shape[:-1].
+        """
+        if y.shape[-1] != self.dim:
+            raise ValueError(
+                f"LinearTransform: expected input last dim {self.dim}, "
+                f"got {y.shape[-1]}"
+            )
+
+        L, U, s = self._reconstruct_L_U_s(params)
+        T = U + jnp.diag(s)
+
+        batch_shape = y.shape[:-1]
+        y_flat = y.reshape((-1, self.dim))  # (B, dim)
+        u_prime = y_flat.T                  # (dim, B)
+
+        # Column-style inverse:
+        # 1) L a = u'   -> a
+        # 2) T u = a    -> u
+        a = jsp.solve_triangular(
+            L, u_prime, lower=True, unit_diagonal=True
+        )
+        u = jsp.solve_triangular(
+            T, a, lower=False
+        )
+
+        x_flat = u.T                        # (B, dim)
+        x = x_flat.reshape(batch_shape + (self.dim,))
+
+        log_det_scalar = jnp.sum(jnp.log(s))  # or sum(log_diag)
+        log_det_inverse = jnp.broadcast_to(-log_det_scalar, batch_shape)
+        return x, log_det_inverse
+
+# ===================================================================
+# Affine Coupling Layer
+# ===================================================================
 @dataclass
 class AffineCoupling:
     """
@@ -48,6 +205,10 @@ class AffineCoupling:
     such that its output is identically zero at initialization. In that case,
     shift = 0 and log_scale = 0, so this layer is exactly the identity map
     at the start of training.
+    
+    References:
+      - Dinh, Krueger, Bengio (2017). "NICE: Non-linear Independent Components Estimation"
+      - Dinh, Sohl-Dickstein, Bengio (2017). "Density estimation using Real NVP"
     """
     mask: Array          # shape (dim,), values 0 or 1
     conditioner: MLP     # Flax MLP module (definition, no params inside)
@@ -163,6 +324,9 @@ class AffineCoupling:
         return x, log_det
 
 
+# ===================================================================
+# Permutation Transform: Fixed permutation of dimensions
+# ===================================================================
 @dataclass
 class Permutation:
     """
@@ -241,6 +405,9 @@ class Permutation:
         return x, log_det
 
 
+# ===================================================================
+# Composite Transform: Sequential composition of multiple transforms
+# ===================================================================
 @dataclass
 class CompositeTransform:
     """

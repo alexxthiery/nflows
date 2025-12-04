@@ -106,16 +106,24 @@ def init_mlp(
     raw_params = variables.get("params", {})
     params = dict(raw_params)  # shallow copy of top-level mapping
 
-    if "dense_out" not in params:
-        raise KeyError(
-            "init_mlp expected a 'dense_out' parameter collection in the MLP; "
-            "check the MLP implementation if this error occurs."
-        )
+    # ------------------------------------------------------------------
+    # Zero-initialize the final Dense layer:
+    # Rationale: for flow conditioners, this makes the initial output zero,
+    # so the flow starts as the identity transform. This is known to greatly
+    # stabilize training since the flow does not start with extreme transforms.
+    # ------------------------------------------------------------------
+    zero_init_final_layer = True
+    if zero_init_final_layer:
+        if "dense_out" not in params:
+            raise KeyError(
+                "init_mlp expected a 'dense_out' parameter collection in the MLP; "
+                "check the MLP implementation if this error occurs."
+            )
 
-    # Zero-initialize final layer: kernel and bias.
-    dense_out = dict(params["dense_out"])
-    dense_out["kernel"] = jnp.zeros_like(dense_out["kernel"])
-    dense_out["bias"] = jnp.zeros_like(dense_out["bias"])
-    params["dense_out"] = dense_out
+        # Zero-initialize final layer: kernel and bias.
+        dense_out = dict(params["dense_out"])
+        dense_out["kernel"] = jnp.zeros_like(dense_out["kernel"])
+        dense_out["bias"] = jnp.zeros_like(dense_out["bias"])
+        params["dense_out"] = dense_out
 
     return mlp, params
