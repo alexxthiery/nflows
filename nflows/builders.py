@@ -8,7 +8,7 @@ import jax.numpy as jnp
 
 from .nets import MLP, init_mlp, Array, PRNGKey
 from .distributions import StandardNormal, DiagNormal
-from .transforms import AffineCoupling, Permutation, CompositeTransform, LinearTransform
+from .transforms import AffineCoupling, Permutation, CompositeTransform, LinearTransform, LoftTransform
 from .flows import Flow
 
 
@@ -99,6 +99,8 @@ def build_realnvp(
     trainable_base: bool = False,
     base_dist: Any | None = None,
     base_params: Any | None = None,
+    activation: Callable[[Array], Array] = jax.nn.tanh,
+    loft_tau: float = 1000.0,
 ) -> Tuple[Flow, Any]:
     """
     Construct a RealNVP-style flow with affine coupling layers.
@@ -139,6 +141,8 @@ def build_realnvp(
                    base_dist is provided, defaults to {}. For DiagNormal, you
                    typically want:
                        {"loc": zeros(dim), "log_scale": zeros(dim)}.
+      activation: Activation function for conditioner MLPs.
+      loft_tau: Threshold parameter for LOFT (stabilizing transform) in the affine coupling.
 
     Returns:
       flow: Flow object (definition only, no parameters inside).
@@ -203,6 +207,7 @@ def build_realnvp(
             in_dim=dim,
             hidden_sizes=hidden_sizes,
             out_dim=2 * dim,
+            activation=activation,
         )
 
         coupling = AffineCoupling(
@@ -221,6 +226,14 @@ def build_realnvp(
             perm_block = Permutation(perm=perm)
             blocks.append(perm_block)
             block_params.append({})  # no parameters for permutation
+    
+    # add the final LOFT transform
+    loft_block = LoftTransform(
+        dim=dim,
+        tau=loft_tau,
+    )
+    blocks.append(loft_block)
+    block_params.append({})  # no parameters for LOFT
 
     transform = CompositeTransform(blocks=blocks)
     

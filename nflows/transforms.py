@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import jax.scipy.linalg as jsp
 
 from .nets import MLP, Array
+import nflows.scalar_function as scalar_function
 
 # ===================================================================
 # Linear Transform with LU-style parameterization
@@ -212,7 +213,7 @@ class AffineCoupling:
     """
     mask: Array          # shape (dim,), values 0 or 1
     conditioner: MLP     # Flax MLP module (definition, no params inside)
-    max_log_scale: float = 5.0
+    max_log_scale: float = 1.0
 
     def __post_init__(self):
         # Ensure mask is a 1D array.
@@ -269,7 +270,7 @@ class AffineCoupling:
 
         shift = shift * m_unmasked
         # Bound log_scale to avoid numerical explosions.
-        log_scale = jnp.tanh(log_scale_raw) * self.max_log_scale * m_unmasked
+        log_scale = jnp.tanh(log_scale_raw / self.max_log_scale) * self.max_log_scale * m_unmasked
 
         return shift, log_scale
 
@@ -491,3 +492,117 @@ class CompositeTransform:
             log_det_total = log_det_total + log_det
 
         return x, log_det_total
+
+
+# ===================================================================
+# LOFT Transform: Coordinate-wise log-soft extension
+# ===================================================================
+@dataclass
+class LoftTransform:
+    """
+    Coordinate-wise LOFT (log soft extension) transform.
+
+    Parameters
+    ----------
+    dim : int
+        Feature dimension (size of the last axis).
+    tau : float
+        Positive threshold where the behavior transitions from linear to
+        logarithmic tails.
+
+    Notes
+    -----
+    - This transform is strictly monotone and C^1 for tau > 0.
+    - params is currently unused, kept only for interface compatibility.
+      If you later want a learnable tau, you can route it through params.
+      
+    References
+    ----------
+    "STABLE TRAINING OF NORMALIZING FLOWS FOR HIGH-DIMENSIONAL VARIATIONAL INFERENCE" by DANIEL ANDRADE
+    """
+    dim: int
+    tau: float
+
+    def __post_init__(self):
+        if self.dim <= 0:
+            raise ValueError(
+                f"LoftTransform: dim must be positive, got {self.dim}."
+            )
+        if self.tau <= 0.0:
+            raise ValueError(
+                f"LoftTransform: tau must be strictly positive, got {self.tau}."
+            )
+
+    def forward(self, params: Any, x: Array) -> Tuple[Array, Array]:
+        """
+        Forward map: x -> y, returning (y, log_det_forward).
+
+        Arguments
+        ---------
+        params : Any
+            Ignored (kept for interface compatibility).
+        x : Array
+            Input tensor of shape (..., dim).
+
+        Returns
+        -------
+        y : Array
+            Transformed tensor of shape (..., dim).
+        log_det_forward : Array
+            log |det ∂y/∂x|, shape x.shape[:-1].
+        """
+        x = jnp.asarray(x)
+
+        if x.shape[-1] != self.dim:
+            raise ValueError(
+                f"LoftTransform: expected input last dim {self.dim}, "
+                f"got {x.shape[-1]}."
+            )
+
+        # Forward LOFT (elementwise) from loft.py
+        y = scalar_function.loft(x, self.tau)
+
+        # loft_logabsdet_fn(x, tau) has same shape as x and contains
+        # elementwise log |g'(x_i)|.
+        log_abs_jac = scalar_function.loft_log_abs_det_jac(x, self.tau)
+        # Sum over feature dimension to get per-sample log-det.
+        log_det_forward = jnp.sum(log_abs_jac, axis=-1)
+
+        return y, log_det_forward
+
+    def inverse(self, params: Any, y: Array) -> Tuple[Array, Array]:
+        """
+        Inverse map: y -> x, returning (x, log_det_inverse).
+
+        Arguments
+        ---------
+        params : Any
+            Ignored (kept for interface compatibility).
+        y : Array
+            Input tensor of shape (..., dim).
+
+        Returns
+        -------
+        x : Array
+            Inverse-transformed tensor of shape (..., dim).
+        log_det_inverse : Array
+            log |det ∂x/∂y|, shape y.shape[:-1].
+        """
+        y = jnp.asarray(y)
+
+        if y.shape[-1] != self.dim:
+            raise ValueError(
+                f"LoftTransform: expected input last dim {self.dim}, "
+                f"got {y.shape[-1]}."
+            )
+
+        # Inverse LOFT (elementwise) from loft.py
+        x = scalar_function.loft_inv(y, self.tau)
+
+        # Forward log |g'(x)| at the recovered x.
+        log_abs_jac_x = scalar_function.loft_log_abs_det_jac(x, self.tau)
+
+        # For the inverse, log |det ∂x/∂y| = - log |det ∂y/∂x|.
+        log_det_inverse = -jnp.sum(log_abs_jac_x, axis=-1)
+
+        return x, log_det_inverse

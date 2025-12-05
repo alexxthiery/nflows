@@ -24,7 +24,7 @@ class MLP(nn.Module):
     in_dim: int
     hidden_sizes: Sequence[int]
     out_dim: int
-    activation: Callable[[Array], Array] = nn.tanh
+    activation: Callable[[Array], Array] = nn.elu
     use_bias: bool = True
     kernel_init: Callable[..., Array] = nn.initializers.lecun_normal()
     bias_init: Callable[..., Array] = nn.initializers.zeros
@@ -68,7 +68,7 @@ def init_mlp(
     in_dim: int,
     hidden_sizes: Sequence[int],
     out_dim: int,
-    activation: Callable[[Array], Array] = nn.tanh,
+    activation: Callable[[Array], Array] = nn.elu,
 ) -> Tuple[MLP, dict]:
     """
     Construct an MLP module and initialize its parameters.
