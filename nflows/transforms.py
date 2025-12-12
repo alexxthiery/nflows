@@ -384,6 +384,7 @@ class SplineCoupling:
     min_bin_width: float = 1e-3
     min_bin_height: float = 1e-3
     min_derivative: float = 1e-3
+    max_derivative: float = 10.0
 
     def __post_init__(self):
         self.mask = jnp.asarray(self.mask, dtype=jnp.float32)
@@ -465,6 +466,7 @@ class SplineCoupling:
                 min_bin_width=self.min_bin_width,
                 min_bin_height=self.min_bin_height,
                 min_derivative=self.min_derivative,
+                max_derivative=self.max_derivative,
                 inverse=inverse,
             )
 

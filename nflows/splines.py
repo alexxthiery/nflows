@@ -39,15 +39,21 @@ def _normalize_bin_params(
     min_bin_width: float,
     min_bin_height: float,
     min_derivative: float,
+    max_derivative: float,
 ) -> Tuple[Array, Array, Array]:
     """
     Convert raw NN outputs into valid spline parameters.
 
     Inputs:
-      unnormalized_widths:    (..., K)
-      unnormalized_heights:   (..., K)
-      unnormalized_derivatives: (..., K-1)  internal knot derivatives
-
+        unnormalized_widths:    (..., K)
+        unnormalized_heights:   (..., K)
+        unnormalized_derivatives: (..., K-1)  internal knot derivatives
+        tail_bound:             scalar B
+        min_bin_width:          lower bound for each bin width (fraction of total)
+        min_bin_height:         lower bound for each bin height (fraction of total)
+        min_derivative:         lower bound for derivatives at internal knots
+        max_derivative:         upper bound for derivatives at internal knots
+        
     Outputs:
       x_k:        (..., K+1)  x-knots in [-B, B], strictly increasing
       y_k:        (..., K+1)  y-knots in [-B, B], strictly increasing
@@ -105,7 +111,15 @@ def _normalize_bin_params(
             f"{num_bins - 1}, got {unnormalized_derivatives.shape[-1]}."
         )
 
-    internal_derivatives = min_derivative + jnn.softplus(unnormalized_derivatives)
+    # internal_derivatives = min_derivative + jnn.softplus(unnormalized_derivatives)
+    
+    # Use sigmoid to also enforce an lower/upper bound on derivatives for stability.
+    internal_derivatives = (
+        min_derivative
+        + (max_derivative - min_derivative)
+        * jnn.sigmoid(unnormalized_derivatives)
+        )
+    
     ones = jnp.ones_like(internal_derivatives[..., :1])
     derivatives = jnp.concatenate(
         [ones, internal_derivatives, ones], axis=-1
@@ -391,6 +405,7 @@ def rational_quadratic_spline(
     min_bin_width: float = 1e-3,
     min_bin_height: float = 1e-3,
     min_derivative: float = 1e-3,
+    max_derivative: float = 10.0,
     inverse: bool = False,
 ) -> Tuple[Array, Array]:
     """
@@ -423,6 +438,7 @@ def rational_quadratic_spline(
         min_bin_width=min_bin_width,
         min_bin_height=min_bin_height,
         min_derivative=min_derivative,
+        max_derivative=max_derivative,
     )
 
     if not inverse:
