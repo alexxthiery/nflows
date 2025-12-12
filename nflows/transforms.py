@@ -10,6 +10,7 @@ import jax.scipy.linalg as jsp
 
 from .nets import MLP, Array
 import nflows.scalar_function as scalar_function
+from .splines import rational_quadratic_spline
 
 # ===================================================================
 # Linear Transform with LU-style parameterization
@@ -176,6 +177,13 @@ class AffineCoupling:
     Masked dimensions (where m = 1) pass through unchanged. Unmasked dimensions
     (where m = 0) are transformed using parameters produced by a conditioner
     network.
+    
+    It roughly works as follows:
+    * Split x into x1 = x * m and x2 = x * (1 - m)
+    * Use x1 as input to a conditioner network to produce shift and log_scale for transforming x2.
+    * Apply the elementwise affine transform on x2: y2 = x2 * exp(log_scale) + shift.
+      Note that the shift and log_scale are zeroed out on the masked dimensions.
+    * Combine y1 = x1 and y2 to produce output y = y1 + y2. This only modifies the unmasked dimensions.
 
     Forward transformation y = T(x):
     x1 = x * m
@@ -187,7 +195,7 @@ class AffineCoupling:
     The returned log_det is log |det ∂y/∂x|, equal to the sum of log_scale on the
     unmasked coordinates.
 
-    Inverse transformation x = T⁻¹(y):
+    Inverse transformation x = T^{-1}(y):
     y1 = y * m
     y2 = y * (1 - m)
     (shift, log_scale) = conditioner(y1)
@@ -322,6 +330,194 @@ class AffineCoupling:
 
         # Inverse log-det is negative of forward log-det.
         log_det = -jnp.sum(log_scale, axis=-1)
+        return x, log_det
+
+
+# ===================================================================
+# Spline Coupling Layer
+# ===================================================================
+@dataclass
+class SplineCoupling:
+    """
+    RealNVP-style coupling layer with monotonic rational-quadratic splines
+    (Durkan et al., 2019).
+    
+    It roughly works as follows:
+    * Split input x into two parts using a binary mask.
+    * Use the masked part as input to a conditioner network to produce spline parameters for the unmasked part.
+    * Apply elementwise monotonic RQ splines on the unmasked part. The masked part remains unchanged.
+    
+    The spline: rational_quadratic_spline in splines.py implements the actual spline logic.
+    It roughly works as follows:
+    * Given K bins, the spline is defined by K widths, K heights, and K-1 internal derivatives.
+    * The spline is monotonic and C^1 continuous.
+    * Outside the interval [-tail_bound, tail_bound], the spline is the identity map.
+
+    Mask semantics:
+      - mask[i] == 1: dimension i is *conditioned on* (left unchanged)
+      - mask[i] == 0: dimension i is *transformed* by a spline
+
+    Conditioner:
+      - A Flax module (e.g. MLP) that maps x_cond = x * mask to spline parameters.
+      - Params are provided via params["mlp"].
+
+    Parameterization per dimension (K bins):
+      - widths:      K
+      - heights:     K
+      - derivatives: K-1  (internal knot derivatives; boundary derivatives are fixed to 1)
+
+      => params_per_dim = 3K - 1
+      => conditioner output dimension = dim * (3K - 1)
+
+    Forward / inverse:
+      - Applies elementwise monotonic RQ spline on the transformed dimensions.
+      - Identity tails outside [-tail_bound, tail_bound] are handled inside splines.py.
+
+    Returns:
+      - output with shape (..., dim)
+      - log_det with shape (...,) corresponding to forward or inverse Jacobian.
+    """
+    mask: Array                 # shape (dim,), values in {0, 1}
+    conditioner: Any            # Flax module, called via conditioner.apply
+    num_bins: int = 8
+    tail_bound: float = 5.0
+    min_bin_width: float = 1e-3
+    min_bin_height: float = 1e-3
+    min_derivative: float = 1e-3
+
+    def __post_init__(self):
+        self.mask = jnp.asarray(self.mask, dtype=jnp.float32)
+        if self.mask.ndim != 1:
+            raise ValueError(
+                f"SplineCoupling: mask must be 1D, got shape {self.mask.shape}."
+            )
+
+    def _conditioner_params(self, params: Any) -> Any:
+        try:
+            return params["mlp"]
+        except Exception as e:
+            raise KeyError("SplineCoupling expected params to contain key 'mlp'.") from e
+
+    def _check_x(self, x: Array) -> int:
+        if x.ndim < 1:
+            raise ValueError(
+                f"SplineCoupling expected input with at least 1 dimension, got {x.shape}."
+            )
+        dim = x.shape[-1]
+        if self.mask.shape != (dim,):
+            raise ValueError(
+                f"SplineCoupling: mask shape {self.mask.shape} does not match "
+                f"input dim {dim}."
+            )
+        if self.num_bins < 1:
+            raise ValueError(
+                f"SplineCoupling: num_bins must be >= 1, got {self.num_bins}."
+            )
+        return dim
+
+    def _compute_spline_params(self, mlp_params: Any, x: Array) -> Tuple[Array, Array, Array]:
+        """
+        Compute raw spline parameters from the conditioner and reshape them to:
+          widths:      (..., dim, K)
+          heights:     (..., dim, K)
+          derivatives: (..., dim, K-1)
+        """
+        dim = x.shape[-1]
+        K = self.num_bins
+        params_per_dim = 3 * K - 1
+        expected_out_dim = dim * params_per_dim
+
+        # Conditioner sees only the masked (conditioning) part.
+        x_cond = x * self.mask
+
+        theta = self.conditioner.apply({"params": mlp_params}, x_cond)  # (..., expected_out_dim)
+        if theta.shape[-1] != expected_out_dim:
+            raise ValueError(
+                "SplineCoupling: conditioner output has wrong size. "
+                f"Expected last dim {expected_out_dim}, got {theta.shape[-1]}."
+            )
+
+        theta = theta.reshape(theta.shape[:-1] + (dim, params_per_dim))  # (..., dim, 3K-1)
+
+        widths = theta[..., :K]                 # (..., dim, K)
+        heights = theta[..., K : 2 * K]         # (..., dim, K)
+        derivatives = theta[..., 2 * K :]       # (..., dim, K-1)
+
+        return widths, heights, derivatives
+
+    def _apply_splines(self, x: Array, widths: Array, heights: Array, derivatives: Array, inverse: bool) -> Tuple[Array, Array]:
+        """
+        Apply scalar splines per dimension using vmap.
+
+        Returns:
+          y: (..., dim)
+          logabsdet_per_dim: (..., dim)
+        """
+        K = self.num_bins  # for readability only
+
+        def per_dim_fn(x_d: Array, w_d: Array, h_d: Array, d_d: Array) -> Tuple[Array, Array]:
+            return rational_quadratic_spline(
+                inputs=x_d,
+                unnormalized_widths=w_d,
+                unnormalized_heights=h_d,
+                unnormalized_derivatives=d_d,
+                tail_bound=self.tail_bound,
+                min_bin_width=self.min_bin_width,
+                min_bin_height=self.min_bin_height,
+                min_derivative=self.min_derivative,
+                inverse=inverse,
+            )
+
+        # vmap over the feature dimension:
+        #   x: (..., dim)          -> map axis -1
+        #   widths/heights: (..., dim, K)   -> map axis -2
+        #   derivatives:    (..., dim, K-1) -> map axis -2
+        y, logabsdet = jax.vmap(
+            per_dim_fn,
+            in_axes=(-1, -2, -2, -2),
+            out_axes=(-1, -1),
+        )(x, widths, heights, derivatives)
+
+        return y, logabsdet
+
+    def forward(self, params: Any, x: Array) -> Tuple[Array, Array]:
+        """
+        Forward map: x -> y with log_det_forward = log|det ∂y/∂x|.
+        """
+        self._check_x(x)
+        mlp_params = self._conditioner_params(params)
+
+        widths, heights, derivatives = self._compute_spline_params(mlp_params, x)
+        y_spline, logabsdet_per_dim = self._apply_splines(
+            x, widths, heights, derivatives, inverse=False
+        )
+
+        # Only transform unmasked dims; masked dims stay identity.
+        inv_mask = 1.0 - self.mask
+        y = x * self.mask + y_spline * inv_mask
+        log_det = jnp.sum(logabsdet_per_dim * inv_mask, axis=-1)
+
+        return y, log_det
+
+    def inverse(self, params: Any, y: Array) -> Tuple[Array, Array]:
+        """
+        Inverse map: y -> x with log_det_inverse = log|det ∂x/∂y|.
+
+        Note: the conditioner depends only on the masked (unchanged) subset.
+        Since masked dimensions are copied through exactly, y * mask == x * mask.
+        """
+        self._check_x(y)
+        mlp_params = self._conditioner_params(params)
+
+        widths, heights, derivatives = self._compute_spline_params(mlp_params, y)
+        x_spline, logabsdet_per_dim = self._apply_splines(
+            y, widths, heights, derivatives, inverse=True
+        )
+
+        inv_mask = 1.0 - self.mask
+        x = y * self.mask + x_spline * inv_mask
+        log_det = jnp.sum(logabsdet_per_dim * inv_mask, axis=-1)
+
         return x, log_det
 
 
@@ -500,7 +696,11 @@ class CompositeTransform:
 @dataclass
 class LoftTransform:
     """
-    Coordinate-wise LOFT (log soft extension) transform.
+    Coordinate-wise LOFT (log soft extension) transform. It is used to
+    stabilize training of normalizing flows in high-dimensional settings.
+    This prevents numerical issues arising from extremely small or large
+    log-densities in high dimensions by modifying the tails of the
+    transformation to be logarithmic instead of linear beyond a threshold.
 
     Parameters
     ----------
