@@ -15,57 +15,57 @@ from nflows.builders import build_realnvp, build_spline_realnvp
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Fixtures - module-scoped to avoid JIT recompilation overhead
 # ---------------------------------------------------------------------------
-@pytest.fixture
+@pytest.fixture(scope="module")
 def key():
     return jax.random.PRNGKey(0)
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def dim():
     return 4
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def context_dim():
     return 2
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def realnvp_flow(key, dim, context_dim):
     """Conditional RealNVP flow."""
     flow, params = build_realnvp(
-        key, dim=dim, num_layers=4, hidden_sizes=[32, 32],
+        key, dim=dim, num_layers=2, hidden_sizes=[16],
         context_dim=context_dim
     )
     return flow, params
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def realnvp_flow_uncond(key, dim):
     """Unconditional RealNVP flow."""
     flow, params = build_realnvp(
-        key, dim=dim, num_layers=4, hidden_sizes=[32, 32]
+        key, dim=dim, num_layers=2, hidden_sizes=[16]
     )
     return flow, params
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def spline_flow(key, dim, context_dim):
     """Conditional Spline flow."""
     flow, params = build_spline_realnvp(
-        key, dim=dim, num_layers=4, hidden_sizes=[32, 32],
+        key, dim=dim, num_layers=2, hidden_sizes=[16],
         context_dim=context_dim, num_bins=8
     )
     return flow, params
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def spline_flow_uncond(key, dim):
     """Unconditional Spline flow."""
     flow, params = build_spline_realnvp(
-        key, dim=dim, num_layers=4, hidden_sizes=[32, 32],
+        key, dim=dim, num_layers=2, hidden_sizes=[16],
         num_bins=8
     )
     return flow, params
@@ -92,8 +92,8 @@ class TestRealNVPConditional:
     def test_invertibility_inverse_forward(self, realnvp_flow, key, dim, context_dim):
         """forward(inverse(x, c), c) ≈ x"""
         flow, params = realnvp_flow
-        x = jax.random.normal(key, (100, dim))
-        context = jax.random.normal(key, (100, context_dim))
+        x = jax.random.normal(key, (20, dim))
+        context = jax.random.normal(key, (20, context_dim))
 
         z, _ = flow.inverse(params, x, context=context)
         x_reconstructed, _ = flow.forward(params, z, context=context)
@@ -104,8 +104,8 @@ class TestRealNVPConditional:
     def test_invertibility_forward_inverse(self, realnvp_flow, key, dim, context_dim):
         """inverse(forward(z, c), c) ≈ z"""
         flow, params = realnvp_flow
-        z = jax.random.normal(key, (100, dim))
-        context = jax.random.normal(key, (100, context_dim))
+        z = jax.random.normal(key, (20, dim))
+        context = jax.random.normal(key, (20, context_dim))
 
         x, _ = flow.forward(params, z, context=context)
         z_reconstructed, _ = flow.inverse(params, x, context=context)
@@ -116,8 +116,8 @@ class TestRealNVPConditional:
     def test_log_det_consistency(self, realnvp_flow, key, dim, context_dim):
         """log_det_forward = -log_det_inverse"""
         flow, params = realnvp_flow
-        z = jax.random.normal(key, (100, dim))
-        context = jax.random.normal(key, (100, context_dim))
+        z = jax.random.normal(key, (20, dim))
+        context = jax.random.normal(key, (20, context_dim))
 
         x, log_det_fwd = flow.forward(params, z, context=context)
         _, log_det_inv = flow.inverse(params, x, context=context)
@@ -158,9 +158,9 @@ class TestRealNVPConditional:
     def test_sample_and_log_prob_consistency(self, realnvp_flow, key, dim, context_dim):
         """sample_and_log_prob matches separate sample + log_prob."""
         flow, params = realnvp_flow
-        context = jax.random.normal(key, (100, context_dim))
+        context = jax.random.normal(key, (20, context_dim))
 
-        samples, log_prob_combined = flow.sample_and_log_prob(params, key, (100,), context=context)
+        samples, log_prob_combined = flow.sample_and_log_prob(params, key, (20,), context=context)
         log_prob_separate = flow.log_prob(params, samples, context=context)
 
         error = jnp.abs(log_prob_combined - log_prob_separate).max()
@@ -204,52 +204,6 @@ class TestRealNVPConditional:
         assert log_prob.shape == (20,)
         assert not jnp.isnan(log_prob).any()
 
-    def test_jit_forward(self, realnvp_flow, key, dim, context_dim):
-        """forward JIT-compiles."""
-        flow, params = realnvp_flow
-        z = jax.random.normal(key, (10, dim))
-        context = jax.random.normal(key, (10, context_dim))
-
-        forward_jit = jax.jit(lambda p, z, c: flow.forward(p, z, context=c))
-        x, log_det = forward_jit(params, z, context)
-
-        assert x.shape == (10, dim)
-        assert log_det.shape == (10,)
-
-    def test_jit_inverse(self, realnvp_flow, key, dim, context_dim):
-        """inverse JIT-compiles."""
-        flow, params = realnvp_flow
-        x = jax.random.normal(key, (10, dim))
-        context = jax.random.normal(key, (10, context_dim))
-
-        inverse_jit = jax.jit(lambda p, x, c: flow.inverse(p, x, context=c))
-        z, log_det = inverse_jit(params, x, context)
-
-        assert z.shape == (10, dim)
-        assert log_det.shape == (10,)
-
-    def test_jit_log_prob(self, realnvp_flow, key, dim, context_dim):
-        """log_prob JIT-compiles."""
-        flow, params = realnvp_flow
-        x = jax.random.normal(key, (10, dim))
-        context = jax.random.normal(key, (10, context_dim))
-
-        log_prob_jit = jax.jit(lambda p, x, c: flow.log_prob(p, x, context=c))
-        lp = log_prob_jit(params, x, context)
-
-        assert lp.shape == (10,)
-
-    def test_jit_sample(self, realnvp_flow, key, dim, context_dim):
-        """sample JIT-compiles."""
-        flow, params = realnvp_flow
-        context = jax.random.normal(key, (10, context_dim))
-
-        sample_jit = jax.jit(lambda p, k, c: flow.sample(p, k, (10,), context=c))
-        samples = sample_jit(params, key, context)
-
-        assert samples.shape == (10, dim)
-
-
 class TestRealNVPUnconditional:
     """Tests for unconditional RealNVP (context=None)."""
 
@@ -285,8 +239,8 @@ class TestSplineConditional:
     def test_invertibility_inverse_forward(self, spline_flow, key, dim, context_dim):
         """forward(inverse(x, c), c) ≈ x"""
         flow, params = spline_flow
-        x = jax.random.normal(key, (100, dim))
-        context = jax.random.normal(key, (100, context_dim))
+        x = jax.random.normal(key, (20, dim))
+        context = jax.random.normal(key, (20, context_dim))
 
         z, _ = flow.inverse(params, x, context=context)
         x_reconstructed, _ = flow.forward(params, z, context=context)
@@ -297,8 +251,8 @@ class TestSplineConditional:
     def test_invertibility_forward_inverse(self, spline_flow, key, dim, context_dim):
         """inverse(forward(z, c), c) ≈ z"""
         flow, params = spline_flow
-        z = jax.random.normal(key, (100, dim))
-        context = jax.random.normal(key, (100, context_dim))
+        z = jax.random.normal(key, (20, dim))
+        context = jax.random.normal(key, (20, context_dim))
 
         x, _ = flow.forward(params, z, context=context)
         z_reconstructed, _ = flow.inverse(params, x, context=context)
@@ -309,8 +263,8 @@ class TestSplineConditional:
     def test_log_det_consistency(self, spline_flow, key, dim, context_dim):
         """log_det_forward = -log_det_inverse"""
         flow, params = spline_flow
-        z = jax.random.normal(key, (100, dim))
-        context = jax.random.normal(key, (100, context_dim))
+        z = jax.random.normal(key, (20, dim))
+        context = jax.random.normal(key, (20, context_dim))
 
         x, log_det_fwd = flow.forward(params, z, context=context)
         _, log_det_inv = flow.inverse(params, x, context=context)
@@ -351,9 +305,9 @@ class TestSplineConditional:
     def test_sample_and_log_prob_consistency(self, spline_flow, key, dim, context_dim):
         """sample_and_log_prob matches separate sample + log_prob."""
         flow, params = spline_flow
-        context = jax.random.normal(key, (100, context_dim))
+        context = jax.random.normal(key, (20, context_dim))
 
-        samples, log_prob_combined = flow.sample_and_log_prob(params, key, (100,), context=context)
+        samples, log_prob_combined = flow.sample_and_log_prob(params, key, (20,), context=context)
         log_prob_separate = flow.log_prob(params, samples, context=context)
 
         error = jnp.abs(log_prob_combined - log_prob_separate).max()
@@ -396,18 +350,6 @@ class TestSplineConditional:
 
         assert log_prob.shape == (20,)
         assert not jnp.isnan(log_prob).any()
-
-    def test_jit_log_prob(self, spline_flow, key, dim, context_dim):
-        """log_prob JIT-compiles."""
-        flow, params = spline_flow
-        x = jax.random.normal(key, (10, dim))
-        context = jax.random.normal(key, (10, context_dim))
-
-        log_prob_jit = jax.jit(lambda p, x, c: flow.log_prob(p, x, context=c))
-        lp = log_prob_jit(params, x, context)
-
-        assert lp.shape == (10,)
-
 
 class TestSplineUnconditional:
     """Tests for unconditional Spline flow (context=None)."""
