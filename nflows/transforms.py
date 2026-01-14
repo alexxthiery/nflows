@@ -192,9 +192,9 @@ class AffineCoupling:
     Forward transformation y = T(x):
     x1 = x * m
     x2 = x * (1 - m)
-    (shift, log_scale) = conditioner(x1)
+    (shift, log_scale) = conditioner(x1) * (1 - m)
     y1 = x1
-    y2 = x2 * exp(log_scale) + shift
+    y2 = (x2 * exp(log_scale) + shift) 
     y = y1 + y2
     The returned log_det is log |det ∂y/∂x|, equal to the sum of log_scale on the
     unmasked coordinates.
@@ -202,7 +202,7 @@ class AffineCoupling:
     Inverse transformation x = T^{-1}(y):
     y1 = y * m
     y2 = y * (1 - m)
-    (shift, log_scale) = conditioner(y1)
+    (shift, log_scale) = conditioner(y1) * (1 - m)
     x2 = (y2 - shift) * exp(-log_scale)
     x = y1 + x2
     The returned log_det is log |det ∂x/∂y| = -sum(log_scale).
@@ -219,6 +219,15 @@ class AffineCoupling:
     shift = 0 and log_scale = 0, so this layer is exactly the identity map
     at the start of training.
     
+    Conditional flows:
+      The optional `context` argument enables conditional density estimation p(x|c).
+      When provided, context is concatenated to the masked input before being passed
+      to the conditioner network. The conditioner MLP must be initialized with
+      `context_dim` matching the size of the context vector.
+
+      Context shape: (batch, context_dim) or (context_dim,) for a single sample.
+      The same context is used for all coupling layers in a flow.
+
     References:
       - Dinh, Krueger, Bengio (2017). "NICE: Non-linear Independent Components Estimation"
       - Dinh, Sohl-Dickstein, Bengio (2017). "Density estimation using Real NVP"
@@ -382,6 +391,15 @@ class SplineCoupling:
     Forward / inverse:
       - Applies elementwise monotonic RQ spline on the transformed dimensions.
       - Identity tails outside [-tail_bound, tail_bound] are handled inside splines.py.
+
+    Conditional flows:
+      The optional `context` argument enables conditional density estimation p(x|c).
+      When provided, context is concatenated to the masked input before being passed
+      to the conditioner network. The conditioner MLP must be initialized with
+      `context_dim` matching the size of the context vector.
+
+      Context shape: (batch, context_dim) or (context_dim,) for a single sample.
+      The same context is used for all coupling layers in a flow.
 
     Returns:
       - output with shape (..., dim)
