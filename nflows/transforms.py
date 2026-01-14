@@ -86,18 +86,20 @@ class LinearTransform:
         s = jnp.exp(log_diag)
         return L, U, s
 
-    def forward(self, params: Any, x: Array) -> Tuple[Array, Array]:
+    def forward(self, params: Any, x: Array, context: Array | None = None) -> Tuple[Array, Array]:
         """
         Forward map: x -> y, returning (y, log_det_forward).
 
         Arguments:
           params: PyTree with leaves 'lower', 'upper', 'log_diag'.
           x: input tensor of shape (..., dim).
+          context: ignored (accepted for interface compatibility).
 
         Returns:
           y: transformed tensor of shape (..., dim).
           log_det: log |det ∂y/∂x| = sum(log_diag), shape x.shape[:-1].
         """
+        del context  # Unused in LinearTransform.
         if x.shape[-1] != self.dim:
             raise ValueError(
                 f"LinearTransform: expected input last dim {self.dim}, "
@@ -123,18 +125,20 @@ class LinearTransform:
         log_det_forward = jnp.broadcast_to(log_det_scalar, batch_shape)
         return y, log_det_forward
 
-    def inverse(self, params: Any, y: Array) -> Tuple[Array, Array]:
+    def inverse(self, params: Any, y: Array, context: Array | None = None) -> Tuple[Array, Array]:
         """
         Inverse map: y -> x, returning (x, log_det_inverse).
 
         Arguments:
           params: PyTree with leaves 'lower', 'upper', 'log_diag'.
           y: input tensor of shape (..., dim).
+          context: ignored (accepted for interface compatibility).
 
         Returns:
           x: inverse-transformed tensor of shape (..., dim).
           log_det: log |det ∂x/∂y| = -sum(log_diag), shape y.shape[:-1].
         """
+        del context  # Unused in LinearTransform.
         if y.shape[-1] != self.dim:
             raise ValueError(
                 f"LinearTransform: expected input last dim {self.dim}, "
@@ -235,7 +239,7 @@ class AffineCoupling:
     def dim(self) -> int:
         return int(self.mask.shape[0])
 
-    def _condition(self, params: dict, x: Array) -> Tuple[Array, Array]:
+    def _condition(self, params: dict, x: Array, context: Array | None = None) -> Tuple[Array, Array]:
         """
         Run the conditioner network and produce shift and log_scale.
 
@@ -243,6 +247,8 @@ class AffineCoupling:
           dict with key "mlp" containing the conditioner parameters.
         x:
           input tensor of shape (..., dim).
+        context:
+          optional conditioning tensor of shape (..., context_dim) or (context_dim,).
         """
         if "mlp" not in params:
             raise KeyError(
@@ -262,7 +268,7 @@ class AffineCoupling:
         # Apply the MLP. We expect output of size 2 * dim
         # which we split into shift and log_scale_raw.
         mlp_params = params["mlp"]
-        out = self.conditioner.apply({"params": mlp_params}, x_masked)
+        out = self.conditioner.apply({"params": mlp_params}, x_masked, context)
 
         if out.shape[-1] != 2 * self.dim:
             raise ValueError(
@@ -282,7 +288,7 @@ class AffineCoupling:
 
         return shift, log_scale
 
-    def forward(self, params: dict, x: Array) -> Tuple[Array, Array]:
+    def forward(self, params: dict, x: Array, context: Array | None = None) -> Tuple[Array, Array]:
         """
         Forward transform: x -> y, returning (y, log_det).
 
@@ -290,12 +296,14 @@ class AffineCoupling:
           dict with key "mlp" for conditioner parameters.
         x:
           input tensor of shape (..., dim).
+        context:
+          optional conditioning tensor passed to the conditioner.
 
         Returns:
           y: transformed tensor of shape (..., dim).
           log_det: log |det J| with shape x.shape[:-1].
         """
-        shift, log_scale = self._condition(params, x)
+        shift, log_scale = self._condition(params, x, context)
 
         x1 = x * self.mask
         x2 = x * (1.0 - self.mask)
@@ -307,7 +315,7 @@ class AffineCoupling:
         log_det = jnp.sum(log_scale, axis=-1)
         return y, log_det
 
-    def inverse(self, params: dict, y: Array) -> Tuple[Array, Array]:
+    def inverse(self, params: dict, y: Array, context: Array | None = None) -> Tuple[Array, Array]:
         """
         Inverse transform: y -> x, returning (x, log_det).
 
@@ -315,12 +323,14 @@ class AffineCoupling:
           dict with key "mlp" for conditioner parameters.
         y:
           input tensor of shape (..., dim).
+        context:
+          optional conditioning tensor passed to the conditioner.
 
         Returns:
           x: inverse-transformed tensor of shape (..., dim).
           log_det: log |det d x / d y| with shape y.shape[:-1].
         """
-        shift, log_scale = self._condition(params, y)
+        shift, log_scale = self._condition(params, y, context)
 
         y1 = y * self.mask
         y2 = y * (1.0 - self.mask)
@@ -416,12 +426,17 @@ class SplineCoupling:
             )
         return dim
 
-    def _compute_spline_params(self, mlp_params: Any, x: Array) -> Tuple[Array, Array, Array]:
+    def _compute_spline_params(self, mlp_params: Any, x: Array, context: Array | None = None) -> Tuple[Array, Array, Array]:
         """
         Compute raw spline parameters from the conditioner and reshape them to:
           widths:      (..., dim, K)
           heights:     (..., dim, K)
           derivatives: (..., dim, K-1)
+
+        Arguments:
+          mlp_params: parameters for the conditioner network.
+          x: input tensor of shape (..., dim).
+          context: optional conditioning tensor passed to the conditioner.
         """
         dim = x.shape[-1]
         K = self.num_bins
@@ -431,7 +446,7 @@ class SplineCoupling:
         # Conditioner sees only the masked (conditioning) part.
         x_cond = x * self.mask
 
-        theta = self.conditioner.apply({"params": mlp_params}, x_cond)  # (..., expected_out_dim)
+        theta = self.conditioner.apply({"params": mlp_params}, x_cond, context)  # (..., expected_out_dim)
         if theta.shape[-1] != expected_out_dim:
             raise ValueError(
                 "SplineCoupling: conditioner output has wrong size. "
@@ -482,14 +497,19 @@ class SplineCoupling:
 
         return y, logabsdet
 
-    def forward(self, params: Any, x: Array) -> Tuple[Array, Array]:
+    def forward(self, params: Any, x: Array, context: Array | None = None) -> Tuple[Array, Array]:
         """
         Forward map: x -> y with log_det_forward = log|det ∂y/∂x|.
+
+        Arguments:
+          params: dict with key "mlp" for conditioner parameters.
+          x: input tensor of shape (..., dim).
+          context: optional conditioning tensor passed to the conditioner.
         """
         self._check_x(x)
         mlp_params = self._conditioner_params(params)
 
-        widths, heights, derivatives = self._compute_spline_params(mlp_params, x)
+        widths, heights, derivatives = self._compute_spline_params(mlp_params, x, context)
         y_spline, logabsdet_per_dim = self._apply_splines(
             x, widths, heights, derivatives, inverse=False
         )
@@ -501,17 +521,22 @@ class SplineCoupling:
 
         return y, log_det
 
-    def inverse(self, params: Any, y: Array) -> Tuple[Array, Array]:
+    def inverse(self, params: Any, y: Array, context: Array | None = None) -> Tuple[Array, Array]:
         """
         Inverse map: y -> x with log_det_inverse = log|det ∂x/∂y|.
 
         Note: the conditioner depends only on the masked (unchanged) subset.
         Since masked dimensions are copied through exactly, y * mask == x * mask.
+
+        Arguments:
+          params: dict with key "mlp" for conditioner parameters.
+          y: input tensor of shape (..., dim).
+          context: optional conditioning tensor passed to the conditioner.
         """
         self._check_x(y)
         mlp_params = self._conditioner_params(params)
 
-        widths, heights, derivatives = self._compute_spline_params(mlp_params, y)
+        widths, heights, derivatives = self._compute_spline_params(mlp_params, y, context)
         x_spline, logabsdet_per_dim = self._apply_splines(
             y, widths, heights, derivatives, inverse=True
         )
@@ -565,7 +590,7 @@ class Permutation:
     def dim(self) -> int:
         return int(self.perm.shape[0])
 
-    def forward(self, params: Any, x: Array) -> Tuple[Array, Array]:
+    def forward(self, params: Any, x: Array, context: Array | None = None) -> Tuple[Array, Array]:
         """
         Forward permutation: x -> y.
 
@@ -573,7 +598,10 @@ class Permutation:
           ignored (kept for interface compatibility).
         x:
           input tensor of shape (..., dim).
+        context:
+          ignored (accepted for interface compatibility).
         """
+        del context  # Unused in Permutation.
         if x.shape[-1] != self.dim:
             raise ValueError(
                 f"Permutation expected input with last dimension {self.dim}, "
@@ -584,7 +612,7 @@ class Permutation:
         log_det = jnp.zeros(x.shape[:-1], dtype=x.dtype)
         return y, log_det
 
-    def inverse(self, params: Any, y: Array) -> Tuple[Array, Array]:
+    def inverse(self, params: Any, y: Array, context: Array | None = None) -> Tuple[Array, Array]:
         """
         Inverse permutation: y -> x.
 
@@ -592,7 +620,10 @@ class Permutation:
           ignored.
         y:
           input tensor of shape (..., dim).
+        context:
+          ignored (accepted for interface compatibility).
         """
+        del context  # Unused in Permutation.
         if y.shape[-1] != self.dim:
             raise ValueError(
                 f"Permutation expected input with last dimension {self.dim}, "
@@ -634,7 +665,7 @@ class CompositeTransform:
     """
     blocks: List[Any]  # list of AffineCoupling, Permutation, etc
 
-    def forward(self, params: Sequence[Any], x: Array) -> Tuple[Array, Array]:
+    def forward(self, params: Sequence[Any], x: Array, context: Array | None = None) -> Tuple[Array, Array]:
         """
         Forward composition: x -> y, applying blocks in order.
 
@@ -642,6 +673,8 @@ class CompositeTransform:
           sequence of parameter objects, one per block.
         x:
           input tensor of shape (..., dim).
+        context:
+          optional conditioning tensor, passed to all sub-blocks.
 
         Returns:
           y: transformed tensor of shape (..., dim).
@@ -657,12 +690,12 @@ class CompositeTransform:
         log_det_total = jnp.zeros(x.shape[:-1], dtype=x.dtype)
 
         for block, p in zip(self.blocks, params):
-            y, log_det = block.forward(p, y)
+            y, log_det = block.forward(p, y, context)
             log_det_total = log_det_total + log_det
 
         return y, log_det_total
 
-    def inverse(self, params: Sequence[Any], y: Array) -> Tuple[Array, Array]:
+    def inverse(self, params: Sequence[Any], y: Array, context: Array | None = None) -> Tuple[Array, Array]:
         """
         Inverse composition: y -> x, applying blocks in reverse order.
 
@@ -670,6 +703,8 @@ class CompositeTransform:
           sequence of parameter objects, one per block (same order as forward).
         y:
           input tensor of shape (..., dim).
+        context:
+          optional conditioning tensor, passed to all sub-blocks.
 
         Returns:
           x: inverse-transformed tensor of shape (..., dim).
@@ -686,7 +721,7 @@ class CompositeTransform:
 
         # Reverse both blocks and parameter sequence.
         for block, p in zip(reversed(self.blocks), reversed(params)):
-            x, log_det = block.inverse(p, x)
+            x, log_det = block.inverse(p, x, context)
             log_det_total = log_det_total + log_det
 
         return x, log_det_total
@@ -735,7 +770,7 @@ class LoftTransform:
                 f"LoftTransform: tau must be strictly positive, got {self.tau}."
             )
 
-    def forward(self, params: Any, x: Array) -> Tuple[Array, Array]:
+    def forward(self, params: Any, x: Array, context: Array | None = None) -> Tuple[Array, Array]:
         """
         Forward map: x -> y, returning (y, log_det_forward).
 
@@ -745,6 +780,8 @@ class LoftTransform:
             Ignored (kept for interface compatibility).
         x : Array
             Input tensor of shape (..., dim).
+        context : Array | None
+            Ignored (accepted for interface compatibility).
 
         Returns
         -------
@@ -753,6 +790,7 @@ class LoftTransform:
         log_det_forward : Array
             log |det ∂y/∂x|, shape x.shape[:-1].
         """
+        del context  # Unused in LoftTransform.
         x = jnp.asarray(x)
 
         if x.shape[-1] != self.dim:
@@ -772,7 +810,7 @@ class LoftTransform:
 
         return y, log_det_forward
 
-    def inverse(self, params: Any, y: Array) -> Tuple[Array, Array]:
+    def inverse(self, params: Any, y: Array, context: Array | None = None) -> Tuple[Array, Array]:
         """
         Inverse map: y -> x, returning (x, log_det_inverse).
 
@@ -782,6 +820,8 @@ class LoftTransform:
             Ignored (kept for interface compatibility).
         y : Array
             Input tensor of shape (..., dim).
+        context : Array | None
+            Ignored (accepted for interface compatibility).
 
         Returns
         -------
@@ -790,6 +830,7 @@ class LoftTransform:
         log_det_inverse : Array
             log |det ∂x/∂y|, shape y.shape[:-1].
         """
+        del context  # Unused in LoftTransform.
         y = jnp.asarray(y)
 
         if y.shape[-1] != self.dim:

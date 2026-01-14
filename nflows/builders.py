@@ -87,6 +87,7 @@ def build_realnvp(
     num_layers: int,
     hidden_sizes: Sequence[int],
     *,
+    context_dim: int = 0,
     max_log_scale: float = 5.0,
     use_permutation: bool = False,
     use_linear: bool = False,
@@ -120,6 +121,9 @@ def build_realnvp(
       dim: Dimensionality of the data / latent space.
       num_layers: Number of affine coupling layers.
       hidden_sizes: Hidden layer sizes for all conditioner MLPs.
+      context_dim: Dimensionality of the conditioning variable. If 0 (default),
+                   the flow is unconditional. Context is concatenated to the
+                   conditioner input.
       max_log_scale: Bound on |log_scale| via tanh to stabilize training.
       use_permutation: If True, insert a fixed reverse permutation between
                        successive coupling layers.
@@ -148,6 +152,13 @@ def build_realnvp(
         raise ValueError(
             f"build_realnvp: num_layers must be positive, got {num_layers}."
         )
+    if context_dim < 0:
+        raise ValueError(
+            f"build_realnvp: context_dim must be non-negative, got {context_dim}."
+        )
+
+    # Conditioner input dimension: input = [x_masked, context]
+    conditioner_in_dim = dim + context_dim
 
     # --------------------------------------------------------------
     # Base distribution and its parameters
@@ -195,10 +206,10 @@ def build_realnvp(
         mask = _make_alternating_mask(dim, parity)
         parity = 1 - parity  # flip parity for next layer
 
-        # Conditioner MLP: input dim = dim, output dim = 2 * dim.
+        # Initialize conditioner MLP with input = [x_masked, context]
         mlp, mlp_params = init_mlp(
             keys[layer_idx],
-            in_dim=dim,
+            in_dim=conditioner_in_dim,
             hidden_sizes=hidden_sizes,
             out_dim=2 * dim,
             activation=activation,
@@ -400,6 +411,7 @@ def build_spline_realnvp(
     num_layers: int,
     hidden_sizes: Sequence[int],
     *,
+    context_dim: int = 0,
     num_bins: int = 8,
     tail_bound: float = 5.0,
     min_bin_width: float = 1e-2,
@@ -451,6 +463,9 @@ def build_spline_realnvp(
       dim: Dimensionality of the data / latent space.
       num_layers: Number of spline coupling layers.
       hidden_sizes: Hidden layer sizes for all conditioner MLPs.
+      context_dim: Dimensionality of the conditioning variable. If 0 (default),
+                   the flow is unconditional. Context is concatenated to the
+                   conditioner input.
 
       num_bins: Number of spline bins (K).
       tail_bound: Spline acts on [-B, B]; outside, the transform is linear with slope 1.
@@ -474,10 +489,13 @@ def build_spline_realnvp(
     """
     if dim <= 0:
         raise ValueError(f"build_spline_realnvp: dim must be positive, got {dim}.")
-    
     if num_layers <= 0:
         raise ValueError(
             f"build_spline_realnvp: num_layers must be positive, got {num_layers}."
+        )
+    if context_dim < 0:
+        raise ValueError(
+            f"build_spline_realnvp: context_dim must be non-negative, got {context_dim}."
         )
     if num_bins <= 0:
         raise ValueError(
@@ -493,6 +511,9 @@ def build_spline_realnvp(
             "build_spline_realnvp: min_bin_height * num_bins must be < 1. "
             f"Got {min_bin_height} * {num_bins} = {min_bin_height * num_bins}."
         )
+
+    # Conditioner input dimension: input = [x_masked, context]
+    conditioner_in_dim = dim + context_dim
 
     # --------------------------------------------------------------
     # Base distribution and its parameters (same logic as build_realnvp)
@@ -538,17 +559,17 @@ def build_spline_realnvp(
         mask = _make_alternating_mask(dim, parity)
         parity = 1 - parity
 
-        # Conditioner MLP: input dim = dim, output dim = dim * (3K - 1).
+        # Initialize conditioner MLP with input = [x_masked, context]
         mlp, mlp_params = init_mlp(
             keys[layer_idx],
-            in_dim=dim,
+            in_dim=conditioner_in_dim,
             hidden_sizes=hidden_sizes,
             out_dim=out_dim,
             activation=activation,
         )
-        
+
         # Patch final layer init so each spline coupling starts near identity.
-        # important for stabilizing training at the start of optimization.
+        # Important for stabilizing training at the start of optimization.
         mlp_params = _patch_spline_conditioner_dense_out(
             mlp_params,
             dim=dim,

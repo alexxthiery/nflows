@@ -30,18 +30,39 @@ class MLP(nn.Module):
     bias_init: Callable[..., Array] = nn.initializers.zeros
 
     @nn.compact
-    def __call__(self, x: Array) -> Array:
-        # Defensive shape check: last dimension must match declared in_dim.
-        if x.ndim < 1:
-            raise ValueError(
-                f"MLP expected input with at least 1 dimension, got shape {x.shape}."
-            )
-        if x.shape[-1] != self.in_dim:
-            raise ValueError(
-                f"MLP expected last dimension {self.in_dim}, got {x.shape[-1]}."
-            )
+    def __call__(self, x: Array, context: Array | None = None) -> Array:
+        """
+        Forward pass through the MLP.
 
-        h = x
+        Arguments:
+            x: Input tensor of shape (..., x_dim).
+            context: Optional context tensor of shape (..., context_dim) or (context_dim,).
+                     If provided, it is concatenated to x before processing, so
+                     in_dim should equal x_dim + context_dim. If None, x is used
+                     directly and in_dim should equal x_dim.
+
+        Returns:
+            Output tensor of shape (..., out_dim).
+        """
+        # Concatenate context to input if provided.
+        if context is not None:
+            # Broadcast context to match x batch dimensions if needed.
+            if context.ndim < x.ndim:
+                # context has shape (context_dim,), broadcast to (..., context_dim)
+                context = jnp.broadcast_to(context, x.shape[:-1] + (context.shape[-1],))
+            h = jnp.concatenate([x, context], axis=-1)
+        else:
+            h = x
+
+        # Defensive shape check: last dimension must match declared in_dim.
+        if h.ndim < 1:
+            raise ValueError(
+                f"MLP expected input with at least 1 dimension, got shape {h.shape}."
+            )
+        if h.shape[-1] != self.in_dim:
+            raise ValueError(
+                f"MLP expected last dimension {self.in_dim}, got {h.shape[-1]}."
+            )
         for i, size in enumerate(self.hidden_sizes):
             h = nn.Dense(
                 features=size,
