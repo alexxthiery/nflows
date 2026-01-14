@@ -5,3 +5,5 @@
 - `real_nvp_neals_funnel.ipynb`: Applies RealNVP to Neal's funnel distribution (a challenging hierarchical target). Demonstrates stability considerations, training configuration, and visualization of learned density and samples versus ground truth.
 
 - `spline_real_nvp_double_well_dim16.ipynb`: Uses a spline-coupling variant of RealNVP on the 16D double-well. Compares spline vs standard affine coupling, shows training curves, qualitative samples, and quantitative metrics.
+
+- `conditional_ring.ipynb`: Demonstrates conditional normalizing flows. Learns p(x | r) where x lies on a 2D ring of radius r. Tests context concatenation in the conditioner network and continuous conditioning.
