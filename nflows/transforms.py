@@ -235,6 +235,7 @@ class AffineCoupling:
     mask: Array          # shape (dim,), values 0 or 1
     conditioner: MLP     # Flax MLP module (definition, no params inside)
     max_log_scale: float = 1.0
+    max_shift: float | None = None  # Default: exp(max_log_scale)
 
     def __post_init__(self):
         # Ensure mask is a 1D array.
@@ -291,8 +292,10 @@ class AffineCoupling:
         # (1 - mask) has 1 for transformed dims, 0 otherwise.
         m_unmasked = 1.0 - self.mask
 
-        shift = shift * m_unmasked
-        # Bound log_scale to avoid numerical explosions.
+        # Bound both shift and log_scale to avoid numerical explosions.
+        # Default max_shift = exp(max_log_scale) matches the maximum scale factor.
+        max_shift = self.max_shift if self.max_shift is not None else jnp.exp(self.max_log_scale)
+        shift = jnp.tanh(shift / max_shift) * max_shift * m_unmasked
         log_scale = jnp.tanh(log_scale_raw / self.max_log_scale) * self.max_log_scale * m_unmasked
 
         return shift, log_scale
@@ -705,13 +708,17 @@ class CompositeTransform:
             )
 
         y = x
-        log_det_total = jnp.zeros(x.shape[:-1], dtype=x.dtype)
+        # Use float64 for log-det accumulation to avoid precision loss in deep flows.
+        # Only use float64 if JAX x64 mode is enabled, otherwise fall back silently.
+        use_f64 = jax.config.read("jax_enable_x64")
+        accum_dtype = jnp.float64 if use_f64 else x.dtype
+        log_det_total = jnp.zeros(x.shape[:-1], dtype=accum_dtype)
 
         for block, p in zip(self.blocks, params):
             y, log_det = block.forward(p, y, context)
-            log_det_total = log_det_total + log_det
+            log_det_total = log_det_total + log_det.astype(accum_dtype)
 
-        return y, log_det_total
+        return y, log_det_total.astype(x.dtype)
 
     def inverse(self, params: Sequence[Any], y: Array, context: Array | None = None) -> Tuple[Array, Array]:
         """
@@ -735,14 +742,18 @@ class CompositeTransform:
             )
 
         x = y
-        log_det_total = jnp.zeros(y.shape[:-1], dtype=y.dtype)
+        # Use float64 for log-det accumulation to avoid precision loss in deep flows.
+        # Only use float64 if JAX x64 mode is enabled, otherwise fall back silently.
+        use_f64 = jax.config.read("jax_enable_x64")
+        accum_dtype = jnp.float64 if use_f64 else y.dtype
+        log_det_total = jnp.zeros(y.shape[:-1], dtype=accum_dtype)
 
         # Reverse both blocks and parameter sequence.
         for block, p in zip(reversed(self.blocks), reversed(params)):
             x, log_det = block.inverse(p, x, context)
-            log_det_total = log_det_total + log_det
+            log_det_total = log_det_total + log_det.astype(accum_dtype)
 
-        return x, log_det_total
+        return x, log_det_total.astype(y.dtype)
 
 
 # ===================================================================

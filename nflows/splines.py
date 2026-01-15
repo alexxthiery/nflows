@@ -87,21 +87,29 @@ def _normalize_bin_params(
     heights = min_bin_height + (1.0 - min_bin_height * num_bins) * heights
     heights = heights * (2.0 * tail_bound)
 
-    # Cumulative sums to get knot positions, starting at -B.
-    # x_k[..., 0] = -B, x_k[..., -1] = +B.
-    x_k = jnp.cumsum(widths, axis=-1)
+    # Cumulative sums to get knot positions in [-B, B].
+    # Pad with 0, then shift by -B to get correct positions.
+    x_k = jnp.cumsum(widths, axis=-1)  # (..., K)
     x_k = jnp.pad(
         x_k,
         pad_width=[(0, 0)] * (x_k.ndim - 1) + [(1, 0)],
-        constant_values=-tail_bound,
-    )
+        constant_values=0.0,
+    )  # (..., K+1) with leading 0
+    x_k = x_k - tail_bound  # shift to start at -B, end at +B
+    # Force exact boundary values to avoid floating-point drift
+    x_k = x_k.at[..., 0].set(-tail_bound)
+    x_k = x_k.at[..., -1].set(tail_bound)
 
-    y_k = jnp.cumsum(heights, axis=-1)
+    y_k = jnp.cumsum(heights, axis=-1)  # (..., K)
     y_k = jnp.pad(
         y_k,
         pad_width=[(0, 0)] * (y_k.ndim - 1) + [(1, 0)],
-        constant_values=-tail_bound,
+        constant_values=0.0,
     )
+    y_k = y_k - tail_bound
+    # Force exact boundary values to avoid floating-point drift
+    y_k = y_k.at[..., 0].set(-tail_bound)
+    y_k = y_k.at[..., -1].set(tail_bound)
 
     # Derivatives at internal knots: positive via softplus + epsilon.
     # Boundary derivatives are set to 1 to match identity tails.
@@ -357,14 +365,19 @@ def _rational_quadratic_inverse_inner(
     b = h * d0 - u * (d1 + d0 - 2.0 * t)
     c = -t * u
 
-    # Quadratic formula with a numerically stable variant.
-    discriminant = jnp.maximum(b * b - 4.0 * a * c, eps)
-    sqrt_disc = jnp.sqrt(discriminant)
+    # Quadratic formula: xi = (-b + sqrt(b² - 4ac)) / (2a)
+    # Stable form: xi = 2c / (-b - sqrt(b² - 4ac))
+    # This always computes the root in [0, 1] for a valid monotonic spline.
+    #
+    # Fix #3: Clamp discriminant to 0 (not eps), add eps inside sqrt.
+    disc = b * b - 4.0 * a * c
+    disc = jnp.maximum(disc, 0.0)
+    sqrt_disc = jnp.sqrt(disc + eps)
 
-    # Use the form 2c / (-b - sign(b) * sqrt_disc) to reduce cancellation.
-    denom = -b - jnp.sign(b) * sqrt_disc
-    denom = jnp.where(jnp.abs(denom) < eps, -b + jnp.sign(b) * sqrt_disc, denom)
-    denom = jnp.maximum(jnp.abs(denom), eps) * jnp.sign(denom)
+    # Fix #2: Ensure denominator is never zero.
+    # The formula 2c / (-b - sqrt_disc) is equivalent to (-b + sqrt_disc) / (2a).
+    denom = -b - sqrt_disc
+    denom = jnp.where(jnp.abs(denom) < eps, eps, denom)
 
     xi = 2.0 * c / denom
     xi = jnp.clip(xi, 0.0, 1.0)

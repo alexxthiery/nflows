@@ -50,6 +50,12 @@ class MLP(nn.Module):
             if context.ndim < x.ndim:
                 # context has shape (context_dim,), broadcast to (..., context_dim)
                 context = jnp.broadcast_to(context, x.shape[:-1] + (context.shape[-1],))
+            elif context.shape[:-1] != x.shape[:-1]:
+                raise ValueError(
+                    f"Context batch shape {context.shape[:-1]} doesn't match "
+                    f"x batch shape {x.shape[:-1]}. Context and x must have "
+                    f"compatible batch dimensions."
+                )
             h = jnp.concatenate([x, context], axis=-1)
         else:
             h = x
