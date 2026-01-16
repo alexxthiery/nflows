@@ -6,4 +6,6 @@
 
 - `spline_real_nvp_double_well_dim16.ipynb`: Uses a spline-coupling variant of RealNVP on the 16D double-well. Compares spline vs standard affine coupling, shows training curves, qualitative samples, and quantitative metrics.
 
+- `spline_three_rings.ipynb`: Tests spline flows on a multi-modal 2D target (three concentric rings). Demonstrates handling of disconnected support and evaluates with radius histograms.
+
 - `conditional_ring.ipynb`: Demonstrates conditional normalizing flows. Learns p(x | r) where x lies on a 2D ring of radius r. Tests context concatenation in the conditioner network and continuous conditioning.
