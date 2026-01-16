@@ -371,3 +371,21 @@ class TestInitFunctions:
 
         # dense_in kernels should differ
         assert not jnp.allclose(params1["dense_in"]["kernel"], params2["dense_in"]["kernel"])
+
+    def test_init_mlp_param_structure_for_builders(self, key):
+        """
+        init_mlp must return params with structure params['net']['dense_out'].
+
+        This structure is required by builders (e.g., _patch_spline_conditioner_dense_out)
+        that modify the output layer for identity initialization. If you change the MLP
+        param structure, update the builders accordingly.
+        """
+        _, params = init_mlp(
+            key, x_dim=4, context_dim=0, hidden_dim=16, n_hidden_layers=2, out_dim=8
+        )
+
+        # These assertions document the contract that builders rely on.
+        assert "net" in params, "MLP params must have 'net' key (ResNet submodule)"
+        assert "dense_out" in params["net"], "MLP params must have 'net/dense_out' key"
+        assert "kernel" in params["net"]["dense_out"], "dense_out must have 'kernel'"
+        assert "bias" in params["net"]["dense_out"], "dense_out must have 'bias'"
