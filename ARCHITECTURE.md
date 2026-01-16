@@ -47,6 +47,31 @@ Available transforms:
 All transforms accept an optional `context` argument. For conditional flows, set
 `context_dim > 0` in builders — the context is concatenated to conditioner inputs.
 
+### Context Feature Extractor
+
+Optionally, a learned MLP can preprocess the context before it's used in the flow:
+
+```python
+flow, params = build_realnvp(
+    key, dim=2,
+    context_dim=5,                      # Raw context dimension
+    context_extractor_hidden_dim=64,    # > 0 enables feature extraction
+    context_extractor_n_layers=2,       # Depth of extractor (default: 2)
+    context_feature_dim=32,             # Output dim (default: same as context_dim)
+    ...
+)
+```
+
+When enabled:
+1. Context passes through a shared `ResNet` feature extractor once
+2. Extracted features replace raw context for all coupling layers
+3. Gradients flow through the extractor for end-to-end training
+
+The feature extractor params are stored in `params["feature_extractor"]`.
+
+**When to use:** When raw context features are not directly informative and a learned
+embedding improves conditioning (e.g., high-dimensional contexts, heterogeneous features).
+
 ## Key Builder Options
 
 | Option | Default | Purpose |
@@ -60,3 +85,6 @@ All transforms accept an optional `context` argument. For conditional flows, set
 | `max_log_scale` | 5.0 | Bound on affine coupling scale (stability) |
 | `loft_tau` | 1000.0 | LOFT threshold for tail stabilization |
 | `activation` | tanh | Conditioner MLP activation |
+| `context_extractor_hidden_dim` | 0 | Hidden dim for context feature extractor (0 = disabled) |
+| `context_extractor_n_layers` | 2 | Residual blocks in context extractor |
+| `context_feature_dim` | None | Output dim of extractor (default: same as `context_dim`) |

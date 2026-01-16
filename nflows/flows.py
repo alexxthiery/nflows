@@ -29,12 +29,38 @@ class Flow:
 
       params["base"]      -> parameters for the base distribution (or {} / None)
       params["transform"] -> parameters for the transform
+      params["feature_extractor"] -> parameters for context feature extractor (optional)
 
-    This class only stores the *definitions* of base_dist and transform.
-    It does not store any trainable parameters.
+    Optionally, a feature_extractor can be provided to learn a representation
+    of the context before it is used in the flow. When provided, context is
+    first passed through the feature extractor, and the resulting features
+    are used in place of raw context throughout the flow.
+
+    This class only stores the *definitions* of base_dist, transform, and
+    feature_extractor. It does not store any trainable parameters.
     """
     base_dist: Any
     transform: Any
+    feature_extractor: Any = None
+
+    # --------------------------------------------------------------
+    # Context feature extraction
+    # --------------------------------------------------------------
+    def _extract_context_features(self, params: Any, context: Array | None) -> Array | None:
+        """
+        Extract features from context using the feature extractor if available.
+
+        Arguments:
+          params: PyTree that may contain "feature_extractor" key.
+          context: raw context tensor, or None.
+
+        Returns:
+          Extracted context features, or original context if no extractor.
+        """
+        if self.feature_extractor is None or context is None:
+            return context
+        fe_params = params["feature_extractor"]
+        return self.feature_extractor.apply({"params": fe_params}, context)
 
     # --------------------------------------------------------------
     # Low-level: forward / inverse maps
@@ -52,8 +78,9 @@ class Flow:
           x: transformed samples, shape (..., dim).
           log_det: log |det ∂x/∂z|, shape (...,).
         """
+        context_features = self._extract_context_features(params, context)
         transform_params = params["transform"]
-        x, log_det = self.transform.forward(transform_params, z, context)
+        x, log_det = self.transform.forward(transform_params, z, context_features)
         return x, log_det
 
     def inverse(self, params: Any, x: Array, context: Array | None = None) -> Tuple[Array, Array]:
@@ -69,8 +96,9 @@ class Flow:
           z: latent samples, shape (..., dim).
           log_det: log |det ∂z/∂x|, shape (...,).
         """
+        context_features = self._extract_context_features(params, context)
         transform_params = params["transform"]
-        z, log_det = self.transform.inverse(transform_params, x, context)
+        z, log_det = self.transform.inverse(transform_params, x, context_features)
         return z, log_det
 
     # --------------------------------------------------------------
@@ -160,12 +188,13 @@ class Flow:
           x: samples from q(x | context), shape (*shape, dim).
           log_q: log q(x | context) evaluated at these samples, shape (*shape,).
         """
+        context_features = self._extract_context_features(params, context)
         base_params = params["base"]
         transform_params = params["transform"]
 
         key_z, _ = jax.random.split(key)
         z = self.base_dist.sample(base_params, key_z, shape)
-        x, log_det_fwd = self.transform.forward(transform_params, z, context)
+        x, log_det_fwd = self.transform.forward(transform_params, z, context_features)
         base_log = self.base_dist.log_prob(base_params, z)
         log_q = base_log - log_det_fwd
         return x, log_q

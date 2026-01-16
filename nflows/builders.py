@@ -6,7 +6,7 @@ from typing import Any, Callable, Tuple
 import jax
 import jax.numpy as jnp
 
-from .nets import MLP, init_mlp, Array, PRNGKey
+from .nets import MLP, init_mlp, ResNet, init_resnet, Array, PRNGKey
 from .distributions import StandardNormal, DiagNormal
 from .transforms import AffineCoupling, Permutation, CompositeTransform, LinearTransform, LoftTransform, SplineCoupling
 from .flows import Flow
@@ -89,6 +89,9 @@ def build_realnvp(
     n_hidden_layers: int,
     *,
     context_dim: int = 0,
+    context_extractor_hidden_dim: int = 0,
+    context_extractor_n_layers: int = 2,
+    context_feature_dim: int | None = None,
     max_log_scale: float = 5.0,
     res_scale: float = 0.1,
     use_permutation: bool = False,
@@ -127,6 +130,12 @@ def build_realnvp(
       context_dim: Dimensionality of the conditioning variable. If 0 (default),
                    the flow is unconditional. Context is concatenated to the
                    conditioner input.
+      context_extractor_hidden_dim: Hidden dimension for context feature extractor.
+                   If > 0, a ResNet is used to extract features from context before
+                   concatenation. If 0 (default), raw context is used directly.
+      context_extractor_n_layers: Number of residual blocks in context extractor (default: 2).
+      context_feature_dim: Output dimension of context extractor. If None (default),
+                   uses context_dim (i.e., same dimension as input context).
       max_log_scale: Bound on |log_scale| via tanh to stabilize training.
       res_scale: Scale factor for residual connections in conditioner MLPs.
       use_permutation: If True, insert a fixed reverse permutation between
@@ -160,6 +169,35 @@ def build_realnvp(
         raise ValueError(
             f"build_realnvp: context_dim must be non-negative, got {context_dim}."
         )
+
+    # --------------------------------------------------------------
+    # Context feature extractor (optional)
+    # --------------------------------------------------------------
+    use_context_extractor = context_extractor_hidden_dim > 0
+
+    if use_context_extractor:
+        if context_dim == 0:
+            raise ValueError(
+                "build_realnvp: context_extractor_hidden_dim > 0 requires context_dim > 0."
+            )
+        # Determine effective context dimension for coupling MLPs.
+        effective_context_dim = context_feature_dim if context_feature_dim is not None else context_dim
+
+        # Split off a key for the feature extractor.
+        key, fe_key = jax.random.split(key)
+        feature_extractor, fe_params = init_resnet(
+            fe_key,
+            in_dim=context_dim,
+            hidden_dim=context_extractor_hidden_dim,
+            out_dim=effective_context_dim,
+            n_hidden_layers=context_extractor_n_layers,
+            activation=activation,
+            res_scale=res_scale,
+        )
+    else:
+        effective_context_dim = context_dim
+        feature_extractor = None
+        fe_params = None
 
     # --------------------------------------------------------------
     # Base distribution and its parameters
@@ -208,10 +246,11 @@ def build_realnvp(
         parity = 1 - parity  # flip parity for next layer
 
         # Initialize conditioner MLP.
+        # Use effective_context_dim (may differ from context_dim if feature extractor is used).
         mlp, mlp_params = init_mlp(
             keys[layer_idx],
             x_dim=dim,
-            context_dim=context_dim,
+            context_dim=effective_context_dim,
             hidden_dim=hidden_dim,
             n_hidden_layers=n_hidden_layers,
             out_dim=2 * dim,
@@ -254,7 +293,11 @@ def build_realnvp(
         "transform": block_params,
     }
 
-    flow = Flow(base_dist=base, transform=transform)
+    # Add feature extractor params if used.
+    if use_context_extractor:
+        params["feature_extractor"] = fe_params
+
+    flow = Flow(base_dist=base, transform=transform, feature_extractor=feature_extractor)
     return flow, params
 
 
@@ -417,6 +460,9 @@ def build_spline_realnvp(
     n_hidden_layers: int,
     *,
     context_dim: int = 0,
+    context_extractor_hidden_dim: int = 0,
+    context_extractor_n_layers: int = 2,
+    context_feature_dim: int | None = None,
     num_bins: int = 8,
     tail_bound: float = 5.0,
     min_bin_width: float = 1e-2,
@@ -473,6 +519,12 @@ def build_spline_realnvp(
       context_dim: Dimensionality of the conditioning variable. If 0 (default),
                    the flow is unconditional. Context is concatenated to the
                    conditioner input.
+      context_extractor_hidden_dim: Hidden dimension for context feature extractor.
+                   If > 0, a ResNet is used to extract features from context before
+                   concatenation. If 0 (default), raw context is used directly.
+      context_extractor_n_layers: Number of residual blocks in context extractor (default: 2).
+      context_feature_dim: Output dimension of context extractor. If None (default),
+                   uses context_dim (i.e., same dimension as input context).
 
       num_bins: Number of spline bins (K).
       tail_bound: Spline acts on [-B, B]; outside, the transform is linear with slope 1.
@@ -521,6 +573,35 @@ def build_spline_realnvp(
         )
 
     # --------------------------------------------------------------
+    # Context feature extractor (optional)
+    # --------------------------------------------------------------
+    use_context_extractor = context_extractor_hidden_dim > 0
+
+    if use_context_extractor:
+        if context_dim == 0:
+            raise ValueError(
+                "build_spline_realnvp: context_extractor_hidden_dim > 0 requires context_dim > 0."
+            )
+        # Determine effective context dimension for coupling MLPs.
+        effective_context_dim = context_feature_dim if context_feature_dim is not None else context_dim
+
+        # Split off a key for the feature extractor.
+        key, fe_key = jax.random.split(key)
+        feature_extractor, fe_params = init_resnet(
+            fe_key,
+            in_dim=context_dim,
+            hidden_dim=context_extractor_hidden_dim,
+            out_dim=effective_context_dim,
+            n_hidden_layers=context_extractor_n_layers,
+            activation=activation,
+            res_scale=res_scale,
+        )
+    else:
+        effective_context_dim = context_dim
+        feature_extractor = None
+        fe_params = None
+
+    # --------------------------------------------------------------
     # Base distribution and its parameters (same logic as build_realnvp)
     # --------------------------------------------------------------
     if base_dist is not None:
@@ -565,10 +646,11 @@ def build_spline_realnvp(
         parity = 1 - parity
 
         # Initialize conditioner MLP.
+        # Use effective_context_dim (may differ from context_dim if feature extractor is used).
         mlp, mlp_params = init_mlp(
             keys[layer_idx],
             x_dim=dim,
-            context_dim=context_dim,
+            context_dim=effective_context_dim,
             hidden_dim=hidden_dim,
             n_hidden_layers=n_hidden_layers,
             out_dim=out_dim,
@@ -623,5 +705,9 @@ def build_spline_realnvp(
         "transform": block_params,
     }
 
-    flow = Flow(base_dist=base, transform=transform)
+    # Add feature extractor params if used.
+    if use_context_extractor:
+        params["feature_extractor"] = fe_params
+
+    flow = Flow(base_dist=base, transform=transform, feature_extractor=feature_extractor)
     return flow, params

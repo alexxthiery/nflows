@@ -12,6 +12,59 @@ Array = jnp.ndarray
 PRNGKey = jax.Array  # type alias for JAX random keys
 
 
+class ResNet(nn.Module):
+    """
+    Residual MLP block: input → hidden → residual blocks → output.
+
+    A reusable residual network architecture that can be used standalone
+    or as a building block within other modules (e.g., MLP, feature extractors).
+
+    Architecture:
+      1. Input projection: x → Dense(hidden_dim) → h
+      2. Residual trunk: h = h + res_scale * F(h) for each layer
+         where F = Dense → activation → Dense
+      3. Output projection: Dense(out_dim)
+
+    Attributes:
+        hidden_dim: Width of residual hidden stream.
+        out_dim: Output dimensionality.
+        n_hidden_layers: Number of residual blocks.
+        activation: Activation function (default: elu).
+        res_scale: Scale applied to residual updates (default: 0.1).
+    """
+
+    hidden_dim: int
+    out_dim: int
+    n_hidden_layers: int = 2
+    activation: Callable[[Array], Array] = nn.elu
+    res_scale: float = 0.1
+
+    @nn.compact
+    def __call__(self, x: Array) -> Array:
+        """
+        Forward pass through the residual network.
+
+        Arguments:
+            x: Input tensor of shape (..., in_dim). Input dimension is inferred.
+
+        Returns:
+            Output tensor of shape (..., out_dim).
+        """
+        # 1. Input projection.
+        h = nn.Dense(self.hidden_dim, name="dense_in")(x)
+
+        # 2. Residual trunk.
+        for i in range(self.n_hidden_layers):
+            r = nn.Dense(self.hidden_dim, name=f"res_{i}_dense0")(h)
+            r = self.activation(r)
+            r = nn.Dense(self.hidden_dim, name=f"res_{i}_dense1")(r)
+            h = h + self.res_scale * r
+
+        # 3. Output projection.
+        out = nn.Dense(self.out_dim, name="dense_out")(h)
+        return out
+
+
 class MLP(nn.Module):
     """
     Residual MLP conditioner for flow layers.
@@ -163,3 +216,60 @@ def init_mlp(
     params["dense_out"] = dense_out
 
     return mlp, params
+
+
+def init_resnet(
+    key: PRNGKey,
+    in_dim: int,
+    hidden_dim: int,
+    out_dim: int,
+    n_hidden_layers: int = 2,
+    activation: Callable[[Array], Array] = nn.elu,
+    res_scale: float = 0.1,
+    zero_init_output: bool = False,
+) -> Tuple[ResNet, dict]:
+    """
+    Construct a ResNet module and initialize its parameters.
+
+    Arguments:
+        key: JAX PRNGKey used for parameter initialization.
+        in_dim: Dimensionality of input (used for dummy input during init).
+        hidden_dim: Width of residual hidden stream.
+        out_dim: Output dimensionality.
+        n_hidden_layers: Number of residual blocks (default: 2).
+        activation: Activation function (default: elu).
+        res_scale: Scale applied to residual updates (default: 0.1).
+        zero_init_output: If True, zero-initialize the output layer (default: False).
+
+    Returns:
+        resnet: A Flax ResNet module (definition only, no params inside).
+        params: A PyTree of parameters for this ResNet (suitable for resnet.apply).
+    """
+    resnet = ResNet(
+        hidden_dim=hidden_dim,
+        out_dim=out_dim,
+        n_hidden_layers=n_hidden_layers,
+        activation=activation,
+        res_scale=res_scale,
+    )
+
+    # Dummy input for initialization.
+    dummy_x = jnp.zeros((1, in_dim), dtype=jnp.float32)
+    variables = resnet.init(key, dummy_x)
+
+    raw_params = variables.get("params", {})
+    params = dict(raw_params)
+
+    # Optionally zero-initialize the output layer.
+    if zero_init_output:
+        if "dense_out" not in params:
+            raise KeyError(
+                "init_resnet expected a 'dense_out' parameter collection; "
+                "check the ResNet implementation if this error occurs."
+            )
+        dense_out = dict(params["dense_out"])
+        dense_out["kernel"] = jnp.zeros_like(dense_out["kernel"])
+        dense_out["bias"] = jnp.zeros_like(dense_out["bias"])
+        params["dense_out"] = dense_out
+
+    return resnet, params
