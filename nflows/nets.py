@@ -1,7 +1,7 @@
 # nflows/nets.py
 from __future__ import annotations
 
-from typing import Callable, Sequence, Tuple
+from typing import Callable, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -14,143 +14,152 @@ PRNGKey = jax.Array  # type alias for JAX random keys
 
 class MLP(nn.Module):
     """
-    Simple fully connected network used as a conditioner in flow layers.
+    Residual MLP conditioner for flow layers.
 
-    Assumptions:
-      - Inputs have shape (..., in_dim).
-      - Last axis is the feature dimension.
-      - Network is purely feedforward, no dropout or batch statistics.
+    Architecture:
+      1. Input projection: inp → Dense(hidden_dim) → h
+      2. Residual trunk: h = h + res_scale * F(h) for each layer
+         where F = Dense → activation → Dense
+      3. Output projection: Dense(out_dim, name="dense_out")
+
+    The final layer is named "dense_out" and should be zero-initialized
+    externally (via init_mlp) to start the flow at identity.
+
+    Attributes:
+        x_dim: Dimensionality of input x.
+        context_dim: Dimensionality of context (0 for unconditional).
+        hidden_dim: Width of residual hidden stream.
+        n_hidden_layers: Number of residual blocks.
+        out_dim: Output dimensionality (e.g., coupling parameters).
+        activation: Activation function (default: elu).
+        res_scale: Scale applied to residual updates (default: 0.1).
     """
-    in_dim: int
-    hidden_sizes: Sequence[int]
-    out_dim: int
+    x_dim: int
+    context_dim: int = 0
+    hidden_dim: int = 64
+    n_hidden_layers: int = 2
+    out_dim: int = 1
     activation: Callable[[Array], Array] = nn.elu
-    use_bias: bool = True
-    kernel_init: Callable[..., Array] = nn.initializers.lecun_normal()
-    bias_init: Callable[..., Array] = nn.initializers.zeros
+    res_scale: float = 0.1
 
     @nn.compact
     def __call__(self, x: Array, context: Array | None = None) -> Array:
         """
-        Forward pass through the MLP.
+        Forward pass through the residual MLP.
 
         Arguments:
             x: Input tensor of shape (..., x_dim).
-            context: Optional context tensor of shape (..., context_dim) or (context_dim,).
-                     If provided, it is concatenated to x before processing, so
-                     in_dim should equal x_dim + context_dim. If None, x is used
-                     directly and in_dim should equal x_dim.
+            context: Optional context tensor:
+                - None (unconditional)
+                - shape (context_dim,) for shared context
+                - shape (..., context_dim) for per-sample context
 
         Returns:
             Output tensor of shape (..., out_dim).
         """
-        # Concatenate context to input if provided.
-        if context is not None:
-            # Broadcast context to match x batch dimensions if needed.
-            if context.ndim < x.ndim:
-                # context has shape (context_dim,), broadcast to (..., context_dim)
-                context = jnp.broadcast_to(context, x.shape[:-1] + (context.shape[-1],))
+        # Shape check for x.
+        if x.shape[-1] != self.x_dim:
+            raise ValueError(
+                f"MLP expected x with last dimension {self.x_dim}, got {x.shape[-1]}."
+            )
+
+        # Context handling.
+        if context is not None and self.context_dim > 0:
+            # Check context feature dimension.
+            if context.shape[-1] != self.context_dim:
+                raise ValueError(
+                    f"MLP expected context with last dimension {self.context_dim}, "
+                    f"got {context.shape[-1]}."
+                )
+            # Broadcast shared context to batch dimensions.
+            if context.ndim == 1:
+                context = jnp.broadcast_to(context, x.shape[:-1] + (self.context_dim,))
             elif context.shape[:-1] != x.shape[:-1]:
                 raise ValueError(
                     f"Context batch shape {context.shape[:-1]} doesn't match "
-                    f"x batch shape {x.shape[:-1]}. Context and x must have "
-                    f"compatible batch dimensions."
+                    f"x batch shape {x.shape[:-1]}."
                 )
-            h = jnp.concatenate([x, context], axis=-1)
+            inp = jnp.concatenate([x, context], axis=-1)
         else:
-            h = x
+            inp = x
 
-        # Defensive shape check: last dimension must match declared in_dim.
-        if h.ndim < 1:
-            raise ValueError(
-                f"MLP expected input with at least 1 dimension, got shape {h.shape}."
-            )
-        if h.shape[-1] != self.in_dim:
-            raise ValueError(
-                f"MLP expected last dimension {self.in_dim}, got {h.shape[-1]}."
-            )
-        for i, size in enumerate(self.hidden_sizes):
-            h = nn.Dense(
-                features=size,
-                use_bias=self.use_bias,
-                kernel_init=self.kernel_init,
-                bias_init=self.bias_init,
-                name=f"dense_{i}",
-            )(h)
-            h = self.activation(h)
+        # 1. Input projection.
+        h = nn.Dense(self.hidden_dim, name="dense_in")(inp)
 
-        # Final linear layer without activation.
-        h = nn.Dense(
-            features=self.out_dim,
-            use_bias=self.use_bias,
-            kernel_init=self.kernel_init,
-            bias_init=self.bias_init,
-            name="dense_out",
-        )(h)
-        return h
+        # 2. Residual trunk.
+        for i in range(self.n_hidden_layers):
+            r = nn.Dense(self.hidden_dim, name=f"res_{i}_dense0")(h)
+            r = self.activation(r)
+            r = nn.Dense(self.hidden_dim, name=f"res_{i}_dense1")(r)
+            h = h + self.res_scale * r
+
+        # 3. Output projection.
+        out = nn.Dense(self.out_dim, name="dense_out")(h)
+        return out
 
 
 def init_mlp(
     key: PRNGKey,
-    in_dim: int,
-    hidden_sizes: Sequence[int],
+    x_dim: int,
+    context_dim: int,
+    hidden_dim: int,
+    n_hidden_layers: int,
     out_dim: int,
     activation: Callable[[Array], Array] = nn.elu,
+    res_scale: float = 0.1,
 ) -> Tuple[MLP, dict]:
     """
-    Construct an MLP module and initialize its parameters.
+    Construct a residual MLP module and initialize its parameters.
 
     Arguments:
-      key: JAX PRNGKey used for parameter initialization.
-      in_dim: Size of the input feature dimension.
-      hidden_sizes: Sizes of the hidden layers.
-      out_dim: Size of the output feature dimension.
-      activation: Activation function applied after each hidden layer.
+        key: JAX PRNGKey used for parameter initialization.
+        x_dim: Dimensionality of input x.
+        context_dim: Dimensionality of context (0 for unconditional).
+        hidden_dim: Width of residual hidden stream.
+        n_hidden_layers: Number of residual blocks.
+        out_dim: Output dimensionality.
+        activation: Activation function (default: elu).
+        res_scale: Scale applied to residual updates (default: 0.1).
 
     Returns:
-      mlp: A Flax MLP module (definition only, no params inside).
-      params: A PyTree of parameters for this MLP (suitable for mlp.apply).
+        mlp: A Flax MLP module (definition only, no params inside).
+        params: A PyTree of parameters for this MLP (suitable for mlp.apply).
 
     Notes:
-      The final linear layer ("dense_out") is explicitly zero-initialized
-      (kernel and bias set to zero). This makes the initial output of the
-      conditioner identically zero, so any flow that interprets the output
-      as shift/log_scale starts exactly at the identity transform.
+        The final linear layer ("dense_out") is explicitly zero-initialized
+        (kernel and bias set to zero). This makes the initial output of the
+        conditioner identically zero, so any flow that interprets the output
+        as shift/log_scale starts exactly at the identity transform.
     """
-
     mlp = MLP(
-        in_dim=in_dim,
-        hidden_sizes=tuple(hidden_sizes),
+        x_dim=x_dim,
+        context_dim=context_dim,
+        hidden_dim=hidden_dim,
+        n_hidden_layers=n_hidden_layers,
         out_dim=out_dim,
         activation=activation,
+        res_scale=res_scale,
     )
-    B = 1  # Dummy batch size for initialization.
-    dummy_x = jnp.zeros((B, in_dim), dtype=jnp.float32)
-    variables = mlp.init(key, dummy_x)
 
-    # Flax returns a FrozenDict for "params". We copy it to a mutable dict so
-    # we can override the final layer weights and bias.
+    # Dummy inputs for initialization.
+    B = 1
+    dummy_x = jnp.zeros((B, x_dim), dtype=jnp.float32)
+    dummy_context = jnp.zeros((B, context_dim), dtype=jnp.float32) if context_dim > 0 else None
+    variables = mlp.init(key, dummy_x, dummy_context)
+
+    # Copy params to mutable dict for zero-init of final layer.
     raw_params = variables.get("params", {})
-    params = dict(raw_params)  # shallow copy of top-level mapping
+    params = dict(raw_params)
 
-    # ------------------------------------------------------------------
-    # Zero-initialize the final Dense layer:
-    # Rationale: for flow conditioners, this makes the initial output zero,
-    # so the flow starts as the identity transform. This is known to greatly
-    # stabilize training since the flow does not start with extreme transforms.
-    # ------------------------------------------------------------------
-    zero_init_final_layer = True
-    if zero_init_final_layer:
-        if "dense_out" not in params:
-            raise KeyError(
-                "init_mlp expected a 'dense_out' parameter collection in the MLP; "
-                "check the MLP implementation if this error occurs."
-            )
-
-        # Zero-initialize final layer: kernel and bias.
-        dense_out = dict(params["dense_out"])
-        dense_out["kernel"] = jnp.zeros_like(dense_out["kernel"])
-        dense_out["bias"] = jnp.zeros_like(dense_out["bias"])
-        params["dense_out"] = dense_out
+    # Zero-initialize the final Dense layer for identity-start flows.
+    if "dense_out" not in params:
+        raise KeyError(
+            "init_mlp expected a 'dense_out' parameter collection in the MLP; "
+            "check the MLP implementation if this error occurs."
+        )
+    dense_out = dict(params["dense_out"])
+    dense_out["kernel"] = jnp.zeros_like(dense_out["kernel"])
+    dense_out["bias"] = jnp.zeros_like(dense_out["bias"])
+    params["dense_out"] = dense_out
 
     return mlp, params

@@ -34,7 +34,8 @@ flow, params = build_realnvp(
     key,
     dim=4,              # Data dimension
     num_layers=4,       # Number of coupling layers
-    hidden_sizes=[64, 64],  # Conditioner MLP architecture
+    hidden_dim=64,      # Conditioner MLP hidden width
+    n_hidden_layers=2,  # Number of residual blocks
 )
 
 # Sample from the flow
@@ -59,7 +60,8 @@ flow, params = build_realnvp(
     key,
     dim=4,
     num_layers=4,
-    hidden_sizes=[64, 64],
+    hidden_dim=64,
+    n_hidden_layers=2,
     context_dim=2,  # Conditioning variable dimension
 )
 
@@ -82,7 +84,8 @@ flow, params = build_spline_realnvp(
     key,
     dim=4,
     num_layers=4,
-    hidden_sizes=[64, 64],
+    hidden_dim=64,
+    n_hidden_layers=2,
     num_bins=8,         # Spline bins per dimension
     tail_bound=5.0,     # Linear tails outside [-B, B]
 )

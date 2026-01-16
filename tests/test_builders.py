@@ -25,7 +25,7 @@ class TestBuildRealNVP:
     def test_basic_build(self, key, dim):
         """Basic flow builds successfully."""
         flow, params = build_realnvp(
-            key, dim=dim, num_layers=2, hidden_sizes=[8]
+            key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1
         )
 
         assert flow is not None
@@ -35,7 +35,7 @@ class TestBuildRealNVP:
     def test_use_linear(self, key, dim):
         """use_linear=True adds LinearTransform at start."""
         flow, params = build_realnvp(
-            key, dim=dim, num_layers=2, hidden_sizes=[8],
+            key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1,
             use_linear=True
         )
 
@@ -52,7 +52,7 @@ class TestBuildRealNVP:
     def test_use_linear_invertibility(self, key, dim):
         """Flow with use_linear=True is invertible."""
         flow, params = build_realnvp(
-            key, dim=dim, num_layers=2, hidden_sizes=[8],
+            key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1,
             use_linear=True
         )
 
@@ -67,7 +67,7 @@ class TestBuildRealNVP:
         """use_permutation=True adds Permutation between couplings."""
         # Use odd dim=5 - reverse permutation breaks mask symmetry for odd dims
         flow, params = build_realnvp(
-            key, dim=5, num_layers=2, hidden_sizes=[8],
+            key, dim=5, num_layers=2, hidden_dim=8, n_hidden_layers=1,
             use_permutation=True
         )
 
@@ -82,7 +82,7 @@ class TestBuildRealNVP:
         """Flow with use_permutation=True is invertible."""
         # Use odd dim=5 - reverse permutation breaks mask symmetry for odd dims
         flow, params = build_realnvp(
-            key, dim=5, num_layers=2, hidden_sizes=[8],
+            key, dim=5, num_layers=2, hidden_dim=8, n_hidden_layers=1,
             use_permutation=True
         )
 
@@ -96,7 +96,7 @@ class TestBuildRealNVP:
     def test_trainable_base(self, key, dim):
         """trainable_base=True uses DiagNormal base."""
         flow, params = build_realnvp(
-            key, dim=dim, num_layers=2, hidden_sizes=[8],
+            key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1,
             trainable_base=True
         )
 
@@ -109,7 +109,7 @@ class TestBuildRealNVP:
     def test_trainable_base_invertibility(self, key, dim):
         """Flow with trainable_base=True is invertible."""
         flow, params = build_realnvp(
-            key, dim=dim, num_layers=2, hidden_sizes=[8],
+            key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1,
             trainable_base=True
         )
 
@@ -128,7 +128,7 @@ class TestBuildRealNVP:
         }
 
         flow, params = build_realnvp(
-            key, dim=dim, num_layers=2, hidden_sizes=[8],
+            key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1,
             base_dist=custom_base,
             base_params=custom_params,
         )
@@ -140,7 +140,7 @@ class TestBuildRealNVP:
         """context_dim creates conditional flow."""
         context_dim = 3
         flow, params = build_realnvp(
-            key, dim=dim, num_layers=2, hidden_sizes=[8],
+            key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1,
             context_dim=context_dim
         )
 
@@ -155,7 +155,7 @@ class TestBuildRealNVP:
         """All options can be combined."""
         # Use odd dim=5 - reverse permutation breaks mask symmetry for odd dims
         flow, params = build_realnvp(
-            key, dim=5, num_layers=2, hidden_sizes=[8],
+            key, dim=5, num_layers=2, hidden_dim=8, n_hidden_layers=1,
             context_dim=2,
             use_linear=True,
             use_permutation=True,
@@ -174,17 +174,17 @@ class TestBuildRealNVP:
     def test_invalid_dim_raises(self, key):
         """dim <= 0 raises ValueError."""
         with pytest.raises(ValueError, match="dim must be positive"):
-            build_realnvp(key, dim=0, num_layers=2, hidden_sizes=[8])
+            build_realnvp(key, dim=0, num_layers=2, hidden_dim=8, n_hidden_layers=1)
 
     def test_invalid_num_layers_raises(self, key, dim):
         """num_layers <= 0 raises ValueError."""
         with pytest.raises(ValueError, match="num_layers must be positive"):
-            build_realnvp(key, dim=dim, num_layers=0, hidden_sizes=[8])
+            build_realnvp(key, dim=dim, num_layers=0, hidden_dim=8, n_hidden_layers=1)
 
     def test_invalid_context_dim_raises(self, key, dim):
         """context_dim < 0 raises ValueError."""
         with pytest.raises(ValueError, match="context_dim must be non-negative"):
-            build_realnvp(key, dim=dim, num_layers=2, hidden_sizes=[8], context_dim=-1)
+            build_realnvp(key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1, context_dim=-1)
 
 
 # ============================================================================
@@ -196,7 +196,7 @@ class TestBuildSplineRealNVP:
     def test_basic_build(self, key, dim):
         """Basic spline flow builds successfully."""
         flow, params = build_spline_realnvp(
-            key, dim=dim, num_layers=2, hidden_sizes=[8], num_bins=4
+            key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1, num_bins=4
         )
 
         assert flow is not None
@@ -206,7 +206,7 @@ class TestBuildSplineRealNVP:
     def test_use_linear(self, key, dim):
         """use_linear=True adds LinearTransform at start."""
         flow, params = build_spline_realnvp(
-            key, dim=dim, num_layers=2, hidden_sizes=[8],
+            key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1,
             use_linear=True, num_bins=4
         )
 
@@ -217,7 +217,7 @@ class TestBuildSplineRealNVP:
         """use_permutation=True adds Permutation between couplings."""
         # Use odd dim=5 - reverse permutation breaks mask symmetry for odd dims
         flow, params = build_spline_realnvp(
-            key, dim=5, num_layers=2, hidden_sizes=[8],
+            key, dim=5, num_layers=2, hidden_dim=8, n_hidden_layers=1,
             use_permutation=True, num_bins=4
         )
 
@@ -229,7 +229,7 @@ class TestBuildSplineRealNVP:
     def test_trainable_base(self, key, dim):
         """trainable_base=True uses DiagNormal base."""
         flow, params = build_spline_realnvp(
-            key, dim=dim, num_layers=2, hidden_sizes=[8],
+            key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1,
             trainable_base=True, num_bins=4
         )
 
@@ -240,7 +240,7 @@ class TestBuildSplineRealNVP:
         """Spline flow with all options is invertible."""
         # Use odd dim=5 - reverse permutation breaks mask symmetry for odd dims
         flow, params = build_spline_realnvp(
-            key, dim=5, num_layers=2, hidden_sizes=[8],
+            key, dim=5, num_layers=2, hidden_dim=8, n_hidden_layers=1,
             use_linear=True,
             use_permutation=True,
             trainable_base=True,
@@ -256,13 +256,13 @@ class TestBuildSplineRealNVP:
     def test_invalid_num_bins_raises(self, key, dim):
         """num_bins <= 0 raises ValueError."""
         with pytest.raises(ValueError, match="num_bins must be positive"):
-            build_spline_realnvp(key, dim=dim, num_layers=2, hidden_sizes=[8], num_bins=0)
+            build_spline_realnvp(key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1, num_bins=0)
 
     def test_invalid_min_bin_width_raises(self, key, dim):
         """min_bin_width * num_bins >= 1 raises ValueError."""
         with pytest.raises(ValueError, match="min_bin_width"):
             build_spline_realnvp(
-                key, dim=dim, num_layers=2, hidden_sizes=[8],
+                key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1,
                 num_bins=4, min_bin_width=0.3  # 0.3 * 4 = 1.2 >= 1
             )
 
@@ -302,7 +302,7 @@ class TestAnalyzeMaskCoverage:
 
         mask0 = jnp.array([1, 0, 1, 0], dtype=jnp.float32)
         mask1 = jnp.array([0, 1, 0, 1], dtype=jnp.float32)
-        mlp = MLP(in_dim=dim, hidden_sizes=[8], out_dim=2*dim)
+        mlp = MLP(x_dim=dim, hidden_dim=8, n_hidden_layers=1, out_dim=2*dim)
 
         blocks = [
             AffineCoupling(mask=mask0, conditioner=mlp),
@@ -319,7 +319,7 @@ class TestAnalyzeMaskCoverage:
 
         # Same mask twice - dims 0 and 2 never transformed
         mask = jnp.array([1, 0, 1, 0], dtype=jnp.float32)
-        mlp = MLP(in_dim=dim, hidden_sizes=[8], out_dim=2*dim)
+        mlp = MLP(x_dim=dim, hidden_dim=8, n_hidden_layers=1, out_dim=2*dim)
 
         blocks = [
             AffineCoupling(mask=mask, conditioner=mlp),

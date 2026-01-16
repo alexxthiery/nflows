@@ -434,7 +434,7 @@ class TestAffineCouplingErrors:
     def test_non_1d_mask_raises(self):
         """Non-1D mask raises ValueError."""
         from nflows.nets import MLP
-        mlp = MLP(in_dim=4, hidden_sizes=[8], out_dim=8)
+        mlp = MLP(x_dim=4, hidden_dim=8, n_hidden_layers=1, out_dim=8)
 
         with pytest.raises(ValueError, match="must be 1D"):
             AffineCoupling(mask=jnp.zeros((2, 2)), conditioner=mlp)
@@ -443,7 +443,7 @@ class TestAffineCouplingErrors:
         """Missing 'mlp' in params raises KeyError."""
         from nflows.nets import MLP
         mask = jnp.array([1, 0, 1, 0], dtype=jnp.float32)
-        mlp = MLP(in_dim=dim, hidden_sizes=[8], out_dim=2 * dim)
+        mlp = MLP(x_dim=dim, hidden_dim=8, n_hidden_layers=1, out_dim=2 * dim)
         coupling = AffineCoupling(mask=mask, conditioner=mlp)
 
         x = jnp.zeros((1, dim))
@@ -454,7 +454,7 @@ class TestAffineCouplingErrors:
     def test_wrong_input_dim_raises(self, key, dim):
         """Wrong input dimension raises ValueError."""
         mask = jnp.array([1, 0, 1, 0], dtype=jnp.float32)
-        mlp, mlp_params = init_mlp(key, in_dim=dim, hidden_sizes=[8], out_dim=2 * dim)
+        mlp, mlp_params = init_mlp(key, x_dim=dim, context_dim=0, hidden_dim=8, n_hidden_layers=1, out_dim=2 * dim)
         coupling = AffineCoupling(mask=mask, conditioner=mlp)
 
         x_wrong = jnp.zeros((5, dim + 1))
@@ -472,7 +472,7 @@ class TestSplineCouplingErrors:
     def test_non_1d_mask_raises(self):
         """Non-1D mask raises ValueError."""
         from nflows.nets import MLP
-        mlp = MLP(in_dim=4, hidden_sizes=[8], out_dim=92)  # 4 * (3*8 - 1)
+        mlp = MLP(x_dim=4, hidden_dim=8, n_hidden_layers=1, out_dim=92)  # 4 * (3*8 - 1)
 
         with pytest.raises(ValueError, match="must be 1D"):
             SplineCoupling(mask=jnp.zeros((2, 2)), conditioner=mlp, num_bins=8)
@@ -483,7 +483,7 @@ class TestSplineCouplingErrors:
         mask = jnp.array([1, 0, 1, 0], dtype=jnp.float32)
         num_bins = 8
         out_dim = dim * (3 * num_bins - 1)
-        mlp = MLP(in_dim=dim, hidden_sizes=[8], out_dim=out_dim)
+        mlp = MLP(x_dim=dim, hidden_dim=8, n_hidden_layers=1, out_dim=out_dim)
         coupling = SplineCoupling(mask=mask, conditioner=mlp, num_bins=num_bins)
 
         x = jnp.zeros((1, dim))

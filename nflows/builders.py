@@ -1,7 +1,7 @@
 # nflows/builders.py
 from __future__ import annotations
 
-from typing import Any, Sequence, Tuple
+from typing import Any, Callable, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -85,10 +85,12 @@ def build_realnvp(
     key: PRNGKey,
     dim: int,
     num_layers: int,
-    hidden_sizes: Sequence[int],
+    hidden_dim: int,
+    n_hidden_layers: int,
     *,
     context_dim: int = 0,
     max_log_scale: float = 5.0,
+    res_scale: float = 0.1,
     use_permutation: bool = False,
     use_linear: bool = False,
     trainable_base: bool = False,
@@ -120,11 +122,13 @@ def build_realnvp(
       key: JAX PRNGKey used to initialize all MLPs.
       dim: Dimensionality of the data / latent space.
       num_layers: Number of affine coupling layers.
-      hidden_sizes: Hidden layer sizes for all conditioner MLPs.
+      hidden_dim: Width of hidden layers in conditioner MLPs.
+      n_hidden_layers: Number of residual blocks in conditioner MLPs.
       context_dim: Dimensionality of the conditioning variable. If 0 (default),
                    the flow is unconditional. Context is concatenated to the
                    conditioner input.
       max_log_scale: Bound on |log_scale| via tanh to stabilize training.
+      res_scale: Scale factor for residual connections in conditioner MLPs.
       use_permutation: If True, insert a fixed reverse permutation between
                        successive coupling layers.
       use_linear: If True, add a global LinearTransform at the start of the flow.
@@ -156,9 +160,6 @@ def build_realnvp(
         raise ValueError(
             f"build_realnvp: context_dim must be non-negative, got {context_dim}."
         )
-
-    # Conditioner input dimension: input = [x_masked, context]
-    conditioner_in_dim = dim + context_dim
 
     # --------------------------------------------------------------
     # Base distribution and its parameters
@@ -206,13 +207,16 @@ def build_realnvp(
         mask = _make_alternating_mask(dim, parity)
         parity = 1 - parity  # flip parity for next layer
 
-        # Initialize conditioner MLP with input = [x_masked, context]
+        # Initialize conditioner MLP.
         mlp, mlp_params = init_mlp(
             keys[layer_idx],
-            in_dim=conditioner_in_dim,
-            hidden_sizes=hidden_sizes,
+            x_dim=dim,
+            context_dim=context_dim,
+            hidden_dim=hidden_dim,
+            n_hidden_layers=n_hidden_layers,
             out_dim=2 * dim,
             activation=activation,
+            res_scale=res_scale,
         )
 
         coupling = AffineCoupling(
@@ -409,7 +413,8 @@ def build_spline_realnvp(
     key: PRNGKey,
     dim: int,
     num_layers: int,
-    hidden_sizes: Sequence[int],
+    hidden_dim: int,
+    n_hidden_layers: int,
     *,
     context_dim: int = 0,
     num_bins: int = 8,
@@ -418,6 +423,7 @@ def build_spline_realnvp(
     min_bin_height: float = 1e-2,
     min_derivative: float = 1e-2,
     max_derivative: float = 10.0,
+    res_scale: float = 0.1,
     use_permutation: bool = False,
     use_linear: bool = False,
     trainable_base: bool = False,
@@ -462,7 +468,8 @@ def build_spline_realnvp(
       key: JAX PRNGKey used to initialize all MLPs.
       dim: Dimensionality of the data / latent space.
       num_layers: Number of spline coupling layers.
-      hidden_sizes: Hidden layer sizes for all conditioner MLPs.
+      hidden_dim: Width of hidden layers in conditioner MLPs.
+      n_hidden_layers: Number of residual blocks in conditioner MLPs.
       context_dim: Dimensionality of the conditioning variable. If 0 (default),
                    the flow is unconditional. Context is concatenated to the
                    conditioner input.
@@ -470,6 +477,7 @@ def build_spline_realnvp(
       num_bins: Number of spline bins (K).
       tail_bound: Spline acts on [-B, B]; outside, the transform is linear with slope 1.
       min_bin_width/min_bin_height/min_derivative: Stability floors used by the spline.
+      res_scale: Scale factor for residual connections in conditioner MLPs.
 
       use_permutation: If True, insert a fixed reverse permutation between successive couplings.
       use_linear: If True, add a global LinearTransform at the start of the flow.
@@ -511,9 +519,6 @@ def build_spline_realnvp(
             "build_spline_realnvp: min_bin_height * num_bins must be < 1. "
             f"Got {min_bin_height} * {num_bins} = {min_bin_height * num_bins}."
         )
-
-    # Conditioner input dimension: input = [x_masked, context]
-    conditioner_in_dim = dim + context_dim
 
     # --------------------------------------------------------------
     # Base distribution and its parameters (same logic as build_realnvp)
@@ -559,13 +564,16 @@ def build_spline_realnvp(
         mask = _make_alternating_mask(dim, parity)
         parity = 1 - parity
 
-        # Initialize conditioner MLP with input = [x_masked, context]
+        # Initialize conditioner MLP.
         mlp, mlp_params = init_mlp(
             keys[layer_idx],
-            in_dim=conditioner_in_dim,
-            hidden_sizes=hidden_sizes,
+            x_dim=dim,
+            context_dim=context_dim,
+            hidden_dim=hidden_dim,
+            n_hidden_layers=n_hidden_layers,
             out_dim=out_dim,
             activation=activation,
+            res_scale=res_scale,
         )
 
         # Patch final layer init so each spline coupling starts near identity.

@@ -13,7 +13,8 @@ flow, params = build_realnvp(
     key=key,
     dim=16,
     num_layers=8,
-    hidden_sizes=[256, 256],
+    hidden_dim=256,
+    n_hidden_layers=2,
 )
 
 # Sample
@@ -37,7 +38,7 @@ def log_target(x):
 
 # Build flow
 key = jax.random.PRNGKey(0)
-flow, params = build_realnvp(key, dim=2, num_layers=4, hidden_sizes=[64, 64])
+flow, params = build_realnvp(key, dim=2, num_layers=4, hidden_dim=64, n_hidden_layers=2)
 
 # Loss: reverse KL = E_q[log q - log π̃]
 def loss_fn(params, key):
@@ -69,7 +70,8 @@ flow, params = build_spline_realnvp(
     key=key,
     dim=16,
     num_layers=8,
-    hidden_sizes=[256, 256],
+    hidden_dim=256,
+    n_hidden_layers=2,
     num_bins=8,           # spline resolution
     tail_bound=5.0,       # linear tails outside [-B, B]
 )
@@ -82,7 +84,8 @@ flow, params = build_realnvp(
     key=key,
     dim=16,
     num_layers=8,
-    hidden_sizes=[256, 256],
+    hidden_dim=256,
+    n_hidden_layers=2,
     context_dim=4,  # conditioning variable dimension
 )
 

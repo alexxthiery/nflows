@@ -36,7 +36,7 @@ def context_dim():
 def realnvp_flow(key, dim, context_dim):
     """Conditional RealNVP flow."""
     flow, params = build_realnvp(
-        key, dim=dim, num_layers=2, hidden_sizes=[16],
+        key, dim=dim, num_layers=2, hidden_dim=16, n_hidden_layers=1,
         context_dim=context_dim
     )
     return flow, params
@@ -46,7 +46,7 @@ def realnvp_flow(key, dim, context_dim):
 def realnvp_flow_uncond(key, dim):
     """Unconditional RealNVP flow."""
     flow, params = build_realnvp(
-        key, dim=dim, num_layers=2, hidden_sizes=[16]
+        key, dim=dim, num_layers=2, hidden_dim=16, n_hidden_layers=1
     )
     return flow, params
 
@@ -55,7 +55,7 @@ def realnvp_flow_uncond(key, dim):
 def spline_flow(key, dim, context_dim):
     """Conditional Spline flow."""
     flow, params = build_spline_realnvp(
-        key, dim=dim, num_layers=2, hidden_sizes=[16],
+        key, dim=dim, num_layers=2, hidden_dim=16, n_hidden_layers=1,
         context_dim=context_dim, num_bins=8
     )
     return flow, params
@@ -65,7 +65,7 @@ def spline_flow(key, dim, context_dim):
 def spline_flow_uncond(key, dim):
     """Unconditional Spline flow."""
     flow, params = build_spline_realnvp(
-        key, dim=dim, num_layers=2, hidden_sizes=[16],
+        key, dim=dim, num_layers=2, hidden_dim=16, n_hidden_layers=1,
         num_bins=8
     )
     return flow, params

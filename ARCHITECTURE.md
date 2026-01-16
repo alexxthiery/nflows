@@ -51,6 +51,9 @@ All transforms accept an optional `context` argument. For conditional flows, set
 
 | Option | Default | Purpose |
 |--------|---------|---------|
+| `hidden_dim` | (required) | Width of conditioner MLP hidden layers |
+| `n_hidden_layers` | (required) | Number of residual blocks in conditioner MLP |
+| `res_scale` | 0.1 | Scale factor for residual connections |
 | `trainable_base` | False | Use DiagNormal base with learnable loc/scale |
 | `use_linear` | False | Add global LU linear transform at start |
 | `use_permutation` | False | Insert reverse permutations between couplings |
