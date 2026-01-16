@@ -403,13 +403,14 @@ def _patch_spline_conditioner_dense_out(
 
     If you change the derivative parameterization in splines.py, update this function.
     """
-    if "dense_out" not in mlp_params:
+    # MLP params are nested under "net" (the ResNet submodule).
+    if "net" not in mlp_params or "dense_out" not in mlp_params["net"]:
         raise KeyError(
-            "_patch_spline_conditioner_dense_out: expected mlp_params to contain 'dense_out'. "
+            "_patch_spline_conditioner_dense_out: expected mlp_params to contain 'net/dense_out'. "
             "Make sure your MLP final layer is named 'dense_out'."
         )
 
-    dense_out = mlp_params["dense_out"]
+    dense_out = mlp_params["net"]["dense_out"]
     if "kernel" not in dense_out or "bias" not in dense_out:
         raise KeyError(
             "_patch_spline_conditioner_dense_out: expected dense_out to contain 'kernel' and 'bias'."
@@ -447,8 +448,11 @@ def _patch_spline_conditioner_dense_out(
     new_dense_out["kernel"] = new_kernel
     new_dense_out["bias"] = new_bias
 
+    # Reconstruct nested structure.
+    new_net_params = dict(mlp_params["net"])
+    new_net_params["dense_out"] = new_dense_out
     new_mlp_params = dict(mlp_params)
-    new_mlp_params["dense_out"] = new_dense_out
+    new_mlp_params["net"] = new_net_params
     return new_mlp_params
 
 

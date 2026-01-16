@@ -318,8 +318,10 @@ class TestInitFunctions:
         )
         assert isinstance(mlp, MLP)
         assert isinstance(params, dict)
-        assert "dense_in" in params
-        assert "dense_out" in params
+        # Params are nested under "net" (the ResNet submodule)
+        assert "net" in params
+        assert "dense_in" in params["net"]
+        assert "dense_out" in params["net"]
 
     def test_init_resnet_returns_module_and_params(self, key):
         """init_resnet returns (ResNet, params) tuple."""
@@ -336,8 +338,9 @@ class TestInitFunctions:
         _, params = init_mlp(
             key, x_dim=4, context_dim=0, hidden_dim=16, n_hidden_layers=2, out_dim=8
         )
-        assert jnp.allclose(params["dense_out"]["kernel"], 0.0)
-        assert jnp.allclose(params["dense_out"]["bias"], 0.0)
+        # Params are nested under "net" (the ResNet submodule)
+        assert jnp.allclose(params["net"]["dense_out"]["kernel"], 0.0)
+        assert jnp.allclose(params["net"]["dense_out"]["bias"], 0.0)
 
     def test_init_resnet_dense_out_not_zero_by_default(self, key):
         """init_resnet does NOT zero-init by default."""

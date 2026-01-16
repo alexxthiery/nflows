@@ -69,14 +69,11 @@ class MLP(nn.Module):
     """
     Residual MLP conditioner for flow layers.
 
-    Architecture:
-      1. Input projection: inp → Dense(hidden_dim) → h
-      2. Residual trunk: h = h + res_scale * F(h) for each layer
-         where F = Dense → activation → Dense
-      3. Output projection: Dense(out_dim, name="dense_out")
+    Wraps a ResNet with context handling (validation, broadcasting, concatenation).
+    The underlying ResNet is stored under the "net" submodule.
 
-    The final layer is named "dense_out" and should be zero-initialized
-    externally (via init_mlp) to start the flow at identity.
+    The final layer ("net/dense_out") should be zero-initialized externally
+    (via init_mlp) to start the flow at identity.
 
     Attributes:
         x_dim: Dimensionality of input x.
@@ -136,19 +133,16 @@ class MLP(nn.Module):
         else:
             inp = x
 
-        # 1. Input projection.
-        h = nn.Dense(self.hidden_dim, name="dense_in")(inp)
-
-        # 2. Residual trunk.
-        for i in range(self.n_hidden_layers):
-            r = nn.Dense(self.hidden_dim, name=f"res_{i}_dense0")(h)
-            r = self.activation(r)
-            r = nn.Dense(self.hidden_dim, name=f"res_{i}_dense1")(r)
-            h = h + self.res_scale * r
-
-        # 3. Output projection.
-        out = nn.Dense(self.out_dim, name="dense_out")(h)
-        return out
+        # Delegate to ResNet for the actual computation.
+        net = ResNet(
+            hidden_dim=self.hidden_dim,
+            out_dim=self.out_dim,
+            n_hidden_layers=self.n_hidden_layers,
+            activation=self.activation,
+            res_scale=self.res_scale,
+            name="net",
+        )
+        return net(inp)
 
 
 def init_mlp(
@@ -205,15 +199,18 @@ def init_mlp(
     params = dict(raw_params)
 
     # Zero-initialize the final Dense layer for identity-start flows.
-    if "dense_out" not in params:
+    # Params are nested under "net" (the ResNet submodule).
+    if "net" not in params or "dense_out" not in params["net"]:
         raise KeyError(
-            "init_mlp expected a 'dense_out' parameter collection in the MLP; "
+            "init_mlp expected a 'net/dense_out' parameter collection in the MLP; "
             "check the MLP implementation if this error occurs."
         )
-    dense_out = dict(params["dense_out"])
+    net_params = dict(params["net"])
+    dense_out = dict(net_params["dense_out"])
     dense_out["kernel"] = jnp.zeros_like(dense_out["kernel"])
     dense_out["bias"] = jnp.zeros_like(dense_out["bias"])
-    params["dense_out"] = dense_out
+    net_params["dense_out"] = dense_out
+    params["net"] = net_params
 
     return mlp, params
 
