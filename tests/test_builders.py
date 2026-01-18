@@ -11,9 +11,19 @@ from nflows.builders import (
     build_spline_realnvp,
     analyze_mask_coverage,
     _make_alternating_mask,
+    make_alternating_mask,
+    create_feature_extractor,
+    assemble_bijection,
+    assemble_flow,
 )
-from nflows.flows import Bijection
-from nflows.transforms import Permutation, LinearTransform, LoftTransform
+from nflows.flows import Bijection, Flow
+from nflows.transforms import (
+    AffineCoupling,
+    SplineCoupling,
+    Permutation,
+    LinearTransform,
+    LoftTransform,
+)
 from nflows.distributions import DiagNormal, StandardNormal
 
 
@@ -446,3 +456,431 @@ class TestReturnTransformOnly:
         assert y.shape == x.shape
         assert not jnp.isnan(y).any()
         assert not jnp.isnan(ld).any()
+
+
+# ============================================================================
+# make_alternating_mask Validation Tests
+# ============================================================================
+class TestMakeAlternatingMaskValidation:
+    """Additional validation tests for make_alternating_mask."""
+
+    def test_invalid_dim_raises(self):
+        """dim <= 0 raises ValueError."""
+        with pytest.raises(ValueError, match="dim must be positive"):
+            make_alternating_mask(dim=0, parity=0)
+        with pytest.raises(ValueError, match="dim must be positive"):
+            make_alternating_mask(dim=-1, parity=0)
+
+    def test_invalid_parity_raises(self):
+        """parity not in {0, 1} raises ValueError."""
+        with pytest.raises(ValueError, match="parity must be 0 or 1"):
+            make_alternating_mask(dim=4, parity=2)
+        with pytest.raises(ValueError, match="parity must be 0 or 1"):
+            make_alternating_mask(dim=4, parity=-1)
+
+
+# ============================================================================
+# create_feature_extractor Tests
+# ============================================================================
+class TestCreateFeatureExtractor:
+    """Tests for create_feature_extractor helper."""
+
+    def test_basic_creation(self, key):
+        """Basic feature extractor creation works."""
+        fe, params = create_feature_extractor(
+            key, in_dim=8, hidden_dim=32, out_dim=16
+        )
+
+        assert fe is not None
+        assert params is not None
+
+    def test_output_shape(self, key):
+        """Feature extractor produces correct output shape."""
+        fe, params = create_feature_extractor(
+            key, in_dim=8, hidden_dim=32, out_dim=16
+        )
+
+        x = jax.random.normal(key, (10, 8))
+        y = fe.apply({"params": params}, x)
+
+        assert y.shape == (10, 16)
+
+    def test_jit_compatible(self, key):
+        """Feature extractor is JIT-compatible."""
+        fe, params = create_feature_extractor(
+            key, in_dim=8, hidden_dim=32, out_dim=16
+        )
+
+        @jax.jit
+        def apply_fe(p, x):
+            return fe.apply({"params": p}, x)
+
+        x = jax.random.normal(key, (10, 8))
+        y = apply_fe(params, x)
+
+        assert y.shape == (10, 16)
+        assert not jnp.isnan(y).any()
+
+    def test_invalid_in_dim_raises(self, key):
+        """in_dim <= 0 raises ValueError."""
+        with pytest.raises(ValueError, match="in_dim must be positive"):
+            create_feature_extractor(key, in_dim=0, hidden_dim=32, out_dim=16)
+
+    def test_invalid_hidden_dim_raises(self, key):
+        """hidden_dim <= 0 raises ValueError."""
+        with pytest.raises(ValueError, match="hidden_dim must be positive"):
+            create_feature_extractor(key, in_dim=8, hidden_dim=0, out_dim=16)
+
+    def test_invalid_out_dim_raises(self, key):
+        """out_dim <= 0 raises ValueError."""
+        with pytest.raises(ValueError, match="out_dim must be positive"):
+            create_feature_extractor(key, in_dim=8, hidden_dim=32, out_dim=0)
+
+    def test_invalid_n_layers_raises(self, key):
+        """n_layers < 1 raises ValueError."""
+        with pytest.raises(ValueError, match="n_layers must be >= 1"):
+            create_feature_extractor(key, in_dim=8, hidden_dim=32, out_dim=16, n_layers=0)
+
+
+# ============================================================================
+# assemble_bijection Tests
+# ============================================================================
+class TestAssembleBijection:
+    """Tests for assemble_bijection function."""
+
+    def test_basic_assembly(self, key, dim):
+        """Basic bijection assembly works."""
+        keys = jax.random.split(key, 3)
+        mask0 = make_alternating_mask(dim, parity=0)
+        mask1 = make_alternating_mask(dim, parity=1)
+
+        blocks_and_params = [
+            AffineCoupling.create(keys[0], dim=dim, mask=mask0, hidden_dim=8, n_hidden_layers=1),
+            AffineCoupling.create(keys[1], dim=dim, mask=mask1, hidden_dim=8, n_hidden_layers=1),
+            LoftTransform.create(keys[2], dim=dim),
+        ]
+
+        bijection, params = assemble_bijection(blocks_and_params)
+
+        assert isinstance(bijection, Bijection)
+        assert "transform" in params
+        assert len(params["transform"]) == 3
+
+    def test_mixed_coupling_types(self, key, dim):
+        """Assembly works with mixed coupling types."""
+        keys = jax.random.split(key, 4)
+        mask0 = make_alternating_mask(dim, parity=0)
+        mask1 = make_alternating_mask(dim, parity=1)
+
+        blocks_and_params = [
+            AffineCoupling.create(keys[0], dim=dim, mask=mask0, hidden_dim=8, n_hidden_layers=1),
+            AffineCoupling.create(keys[1], dim=dim, mask=mask1, hidden_dim=8, n_hidden_layers=1),
+            SplineCoupling.create(keys[2], dim=dim, mask=mask0, hidden_dim=8, n_hidden_layers=1, num_bins=4),
+            LinearTransform.create(keys[3], dim=dim),
+        ]
+
+        bijection, params = assemble_bijection(blocks_and_params)
+
+        assert isinstance(bijection, Bijection)
+        assert len(params["transform"]) == 4
+
+    def test_invertibility(self, key, dim):
+        """Assembled bijection is invertible."""
+        keys = jax.random.split(key, 3)
+        mask0 = make_alternating_mask(dim, parity=0)
+        mask1 = make_alternating_mask(dim, parity=1)
+
+        blocks_and_params = [
+            AffineCoupling.create(keys[0], dim=dim, mask=mask0, hidden_dim=8, n_hidden_layers=1),
+            AffineCoupling.create(keys[1], dim=dim, mask=mask1, hidden_dim=8, n_hidden_layers=1),
+            LoftTransform.create(keys[2], dim=dim),
+        ]
+
+        bijection, params = assemble_bijection(blocks_and_params)
+
+        x = jax.random.normal(key, (10, dim))
+        y, ld_fwd = bijection.forward(params, x)
+        x_rec, ld_inv = bijection.inverse(params, y)
+
+        assert jnp.abs(x - x_rec).max() < 1e-4
+        assert jnp.abs(ld_fwd + ld_inv).max() < 1e-4
+
+    def test_with_context(self, key, dim, context_dim):
+        """Assembly works with context."""
+        keys = jax.random.split(key, 3)
+        mask0 = make_alternating_mask(dim, parity=0)
+        mask1 = make_alternating_mask(dim, parity=1)
+
+        blocks_and_params = [
+            AffineCoupling.create(keys[0], dim=dim, mask=mask0, hidden_dim=8, n_hidden_layers=1, context_dim=context_dim),
+            AffineCoupling.create(keys[1], dim=dim, mask=mask1, hidden_dim=8, n_hidden_layers=1, context_dim=context_dim),
+            LoftTransform.create(keys[2], dim=dim),
+        ]
+
+        bijection, params = assemble_bijection(blocks_and_params)
+
+        x = jax.random.normal(key, (10, dim))
+        ctx = jax.random.normal(key, (10, context_dim))
+
+        y, ld_fwd = bijection.forward(params, x, context=ctx)
+        x_rec, ld_inv = bijection.inverse(params, y, context=ctx)
+
+        assert y.shape == x.shape
+        assert jnp.abs(x - x_rec).max() < 1e-4
+
+    def test_with_feature_extractor(self, key, dim):
+        """Assembly works with feature extractor."""
+        keys = jax.random.split(key, 4)
+        raw_context_dim = 8
+        effective_context_dim = 4
+
+        # Create feature extractor
+        fe, fe_params = create_feature_extractor(
+            keys[0], in_dim=raw_context_dim, hidden_dim=16, out_dim=effective_context_dim
+        )
+
+        mask0 = make_alternating_mask(dim, parity=0)
+        mask1 = make_alternating_mask(dim, parity=1)
+
+        # Couplings use effective_context_dim
+        blocks_and_params = [
+            AffineCoupling.create(keys[1], dim=dim, mask=mask0, hidden_dim=8, n_hidden_layers=1, context_dim=effective_context_dim),
+            AffineCoupling.create(keys[2], dim=dim, mask=mask1, hidden_dim=8, n_hidden_layers=1, context_dim=effective_context_dim),
+            LoftTransform.create(keys[3], dim=dim),
+        ]
+
+        bijection, params = assemble_bijection(
+            blocks_and_params,
+            feature_extractor=fe,
+            feature_extractor_params=fe_params,
+        )
+
+        assert bijection.feature_extractor is not None
+        assert "feature_extractor" in params
+        assert "transform" in params
+
+        # Test forward/inverse with raw context
+        x = jax.random.normal(key, (10, dim))
+        raw_ctx = jax.random.normal(key, (10, raw_context_dim))
+
+        y, ld_fwd = bijection.forward(params, x, context=raw_ctx)
+        x_rec, ld_inv = bijection.inverse(params, y, context=raw_ctx)
+
+        assert y.shape == x.shape
+        assert jnp.abs(x - x_rec).max() < 1e-4
+
+    def test_empty_list_raises(self):
+        """Empty blocks_and_params raises ValueError."""
+        with pytest.raises(ValueError, match="cannot be empty"):
+            assemble_bijection([])
+
+    def test_non_tuple_raises(self, key, dim):
+        """Non-tuple elements raise ValueError."""
+        mask0 = make_alternating_mask(dim, parity=0)
+        coupling, params = AffineCoupling.create(key, dim=dim, mask=mask0, hidden_dim=8, n_hidden_layers=1)
+
+        with pytest.raises(ValueError, match="must be a .* tuple"):
+            assemble_bijection([coupling])  # Just the coupling, not a tuple
+
+    def test_fe_without_params_raises(self, key, dim):
+        """feature_extractor without params raises ValueError."""
+        keys = jax.random.split(key, 3)
+        mask0 = make_alternating_mask(dim, parity=0)
+        mask1 = make_alternating_mask(dim, parity=1)
+
+        fe, fe_params = create_feature_extractor(keys[0], in_dim=4, hidden_dim=8, out_dim=2)
+
+        blocks_and_params = [
+            AffineCoupling.create(keys[1], dim=dim, mask=mask0, hidden_dim=8, n_hidden_layers=1, context_dim=2),
+            AffineCoupling.create(keys[2], dim=dim, mask=mask1, hidden_dim=8, n_hidden_layers=1, context_dim=2),
+        ]
+
+        with pytest.raises(ValueError, match="feature_extractor_params is required"):
+            assemble_bijection(blocks_and_params, feature_extractor=fe)
+
+    def test_fe_params_without_fe_raises(self, key, dim):
+        """feature_extractor_params without feature_extractor raises ValueError."""
+        keys = jax.random.split(key, 3)
+        mask0 = make_alternating_mask(dim, parity=0)
+        mask1 = make_alternating_mask(dim, parity=1)
+
+        fe, fe_params = create_feature_extractor(keys[0], in_dim=4, hidden_dim=8, out_dim=2)
+
+        blocks_and_params = [
+            AffineCoupling.create(keys[1], dim=dim, mask=mask0, hidden_dim=8, n_hidden_layers=1),
+            AffineCoupling.create(keys[2], dim=dim, mask=mask1, hidden_dim=8, n_hidden_layers=1),
+        ]
+
+        with pytest.raises(ValueError, match="feature_extractor is None"):
+            assemble_bijection(blocks_and_params, feature_extractor_params=fe_params)
+
+    def test_validate_false_skips_checks(self, key, dim):
+        """validate=False skips validation."""
+        keys = jax.random.split(key, 2)
+        # Use same mask twice - would fail mask coverage check
+        mask = make_alternating_mask(dim, parity=0)
+
+        blocks_and_params = [
+            AffineCoupling.create(keys[0], dim=dim, mask=mask, hidden_dim=8, n_hidden_layers=1),
+            AffineCoupling.create(keys[1], dim=dim, mask=mask, hidden_dim=8, n_hidden_layers=1),
+        ]
+
+        # Should fail with validate=True
+        with pytest.raises(ValueError, match="never transformed"):
+            assemble_bijection(blocks_and_params, validate=True)
+
+        # Should succeed with validate=False
+        bijection, params = assemble_bijection(blocks_and_params, validate=False)
+        assert isinstance(bijection, Bijection)
+
+    def test_only_non_coupling_blocks(self, key, dim):
+        """Assembly works with only non-coupling blocks."""
+        keys = jax.random.split(key, 2)
+
+        blocks_and_params = [
+            LinearTransform.create(keys[0], dim=dim),
+            LoftTransform.create(keys[1], dim=dim),
+        ]
+
+        # Should work - no mask coverage check needed
+        bijection, params = assemble_bijection(blocks_and_params)
+        assert isinstance(bijection, Bijection)
+
+
+# ============================================================================
+# assemble_flow Tests
+# ============================================================================
+class TestAssembleFlow:
+    """Tests for assemble_flow function."""
+
+    def test_basic_assembly(self, key, dim):
+        """Basic flow assembly works."""
+        keys = jax.random.split(key, 3)
+        mask0 = make_alternating_mask(dim, parity=0)
+        mask1 = make_alternating_mask(dim, parity=1)
+
+        blocks_and_params = [
+            AffineCoupling.create(keys[0], dim=dim, mask=mask0, hidden_dim=8, n_hidden_layers=1),
+            AffineCoupling.create(keys[1], dim=dim, mask=mask1, hidden_dim=8, n_hidden_layers=1),
+            LoftTransform.create(keys[2], dim=dim),
+        ]
+
+        flow, params = assemble_flow(blocks_and_params, base=StandardNormal(dim=dim))
+
+        assert isinstance(flow, Flow)
+        assert "base" in params
+        assert "transform" in params
+
+    def test_log_prob_and_sample(self, key, dim):
+        """Assembled flow has working log_prob and sample."""
+        keys = jax.random.split(key, 4)
+        mask0 = make_alternating_mask(dim, parity=0)
+        mask1 = make_alternating_mask(dim, parity=1)
+
+        blocks_and_params = [
+            AffineCoupling.create(keys[0], dim=dim, mask=mask0, hidden_dim=8, n_hidden_layers=1),
+            AffineCoupling.create(keys[1], dim=dim, mask=mask1, hidden_dim=8, n_hidden_layers=1),
+            LoftTransform.create(keys[2], dim=dim),
+        ]
+
+        flow, params = assemble_flow(blocks_and_params, base=StandardNormal(dim=dim))
+
+        # Sample
+        samples = flow.sample(params, keys[3], shape=(100,))
+        assert samples.shape == (100, dim)
+        assert not jnp.isnan(samples).any()
+
+        # Log prob
+        log_prob = flow.log_prob(params, samples)
+        assert log_prob.shape == (100,)
+        assert not jnp.isnan(log_prob).any()
+
+    def test_with_diag_normal_base(self, key, dim):
+        """Assembly works with DiagNormal (trainable) base."""
+        keys = jax.random.split(key, 3)
+        mask0 = make_alternating_mask(dim, parity=0)
+        mask1 = make_alternating_mask(dim, parity=1)
+
+        blocks_and_params = [
+            AffineCoupling.create(keys[0], dim=dim, mask=mask0, hidden_dim=8, n_hidden_layers=1),
+            AffineCoupling.create(keys[1], dim=dim, mask=mask1, hidden_dim=8, n_hidden_layers=1),
+        ]
+
+        flow, params = assemble_flow(blocks_and_params, base=DiagNormal(dim=dim))
+
+        assert "loc" in params["base"]
+        assert "log_scale" in params["base"]
+
+    def test_with_custom_base_params(self, key, dim):
+        """Assembly works with custom base_params."""
+        keys = jax.random.split(key, 3)
+        mask0 = make_alternating_mask(dim, parity=0)
+        mask1 = make_alternating_mask(dim, parity=1)
+
+        blocks_and_params = [
+            AffineCoupling.create(keys[0], dim=dim, mask=mask0, hidden_dim=8, n_hidden_layers=1),
+            AffineCoupling.create(keys[1], dim=dim, mask=mask1, hidden_dim=8, n_hidden_layers=1),
+        ]
+
+        custom_base_params = {
+            "loc": jnp.ones(dim),
+            "log_scale": jnp.zeros(dim),
+        }
+
+        flow, params = assemble_flow(
+            blocks_and_params,
+            base=DiagNormal(dim=dim),
+            base_params=custom_base_params,
+        )
+
+        assert jnp.allclose(params["base"]["loc"], jnp.ones(dim))
+
+    def test_base_none_raises(self, key, dim):
+        """base=None raises ValueError."""
+        keys = jax.random.split(key, 2)
+        mask0 = make_alternating_mask(dim, parity=0)
+        mask1 = make_alternating_mask(dim, parity=1)
+
+        blocks_and_params = [
+            AffineCoupling.create(keys[0], dim=dim, mask=mask0, hidden_dim=8, n_hidden_layers=1),
+            AffineCoupling.create(keys[1], dim=dim, mask=mask1, hidden_dim=8, n_hidden_layers=1),
+        ]
+
+        with pytest.raises(ValueError, match="base distribution is required"):
+            assemble_flow(blocks_and_params, base=None)
+
+    def test_with_feature_extractor(self, key, dim):
+        """Assembly works with feature extractor."""
+        keys = jax.random.split(key, 4)
+        raw_context_dim = 8
+        effective_context_dim = 4
+
+        fe, fe_params = create_feature_extractor(
+            keys[0], in_dim=raw_context_dim, hidden_dim=16, out_dim=effective_context_dim
+        )
+
+        mask0 = make_alternating_mask(dim, parity=0)
+        mask1 = make_alternating_mask(dim, parity=1)
+
+        blocks_and_params = [
+            AffineCoupling.create(keys[1], dim=dim, mask=mask0, hidden_dim=8, n_hidden_layers=1, context_dim=effective_context_dim),
+            AffineCoupling.create(keys[2], dim=dim, mask=mask1, hidden_dim=8, n_hidden_layers=1, context_dim=effective_context_dim),
+        ]
+
+        flow, params = assemble_flow(
+            blocks_and_params,
+            base=StandardNormal(dim=dim),
+            feature_extractor=fe,
+            feature_extractor_params=fe_params,
+        )
+
+        assert "feature_extractor" in params
+        assert flow.feature_extractor is not None
+
+        # Test with context
+        x = jax.random.normal(key, (10, dim))
+        raw_ctx = jax.random.normal(key, (10, raw_context_dim))
+
+        log_prob = flow.log_prob(params, x, context=raw_ctx)
+        assert log_prob.shape == (10,)
+        assert not jnp.isnan(log_prob).any()

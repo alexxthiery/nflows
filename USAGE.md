@@ -144,3 +144,75 @@ bijection, bij_params = build_realnvp(..., return_transform_only=True)
 my_flow = Flow(base_dist=my_custom_dist, transform=bijection.transform,
                feature_extractor=bijection.feature_extractor)
 ```
+
+## Custom flow architectures
+
+For non-standard architectures (e.g., mixing affine and spline couplings), use the
+assembly API:
+
+```python
+from nflows.builders import make_alternating_mask, assemble_bijection, assemble_flow
+from nflows.transforms import AffineCoupling, SplineCoupling, LinearTransform, LoftTransform
+from nflows.distributions import StandardNormal
+
+# Split key for each block
+keys = jax.random.split(key, 5)
+
+# Create masks
+dim = 8
+mask0 = make_alternating_mask(dim, parity=0)
+mask1 = make_alternating_mask(dim, parity=1)
+
+# Build blocks - each .create() returns (transform, params)
+blocks_and_params = [
+    AffineCoupling.create(keys[0], dim=dim, mask=mask0, hidden_dim=64, n_hidden_layers=2),
+    AffineCoupling.create(keys[1], dim=dim, mask=mask1, hidden_dim=64, n_hidden_layers=2),
+    SplineCoupling.create(keys[2], dim=dim, mask=mask0, hidden_dim=64, n_hidden_layers=2, num_bins=8),
+    LinearTransform.create(keys[3], dim=dim),
+    LoftTransform.create(keys[4], dim=dim),
+]
+
+# Assemble into Bijection (no base distribution)
+bijection, params = assemble_bijection(blocks_and_params)
+
+# Or assemble into Flow (with base distribution)
+flow, params = assemble_flow(blocks_and_params, base=StandardNormal(dim=dim))
+```
+
+### With context and feature extractor
+
+```python
+from nflows.builders import make_alternating_mask, create_feature_extractor, assemble_bijection
+
+keys = jax.random.split(key, 4)
+dim = 8
+raw_context_dim = 16
+effective_context_dim = 8  # output of feature extractor
+
+# Create feature extractor
+fe, fe_params = create_feature_extractor(
+    keys[0], in_dim=raw_context_dim, hidden_dim=32, out_dim=effective_context_dim
+)
+
+# Couplings use effective_context_dim (not raw)
+mask0 = make_alternating_mask(dim, parity=0)
+mask1 = make_alternating_mask(dim, parity=1)
+
+blocks_and_params = [
+    AffineCoupling.create(keys[1], dim=dim, mask=mask0, hidden_dim=64, n_hidden_layers=2,
+                          context_dim=effective_context_dim),
+    AffineCoupling.create(keys[2], dim=dim, mask=mask1, hidden_dim=64, n_hidden_layers=2,
+                          context_dim=effective_context_dim),
+    LoftTransform.create(keys[3], dim=dim),
+]
+
+# Assemble with feature extractor
+bijection, params = assemble_bijection(
+    blocks_and_params,
+    feature_extractor=fe,
+    feature_extractor_params=fe_params,
+)
+
+# Forward pass - pass raw context, fe transforms it internally
+y, log_det = bijection.forward(params, x, context=raw_context)
+```

@@ -119,6 +119,31 @@ x_rec, _   = bijection.inverse(params, y, context=context)
 
 Use cases: change of variables, learned coordinate transforms, custom base distributions.
 
+### Custom Architectures (Assembly API)
+
+For non-standard architectures (mixing coupling types, custom layer order):
+
+```python
+from nflows.builders import make_alternating_mask, assemble_bijection
+from nflows.transforms import AffineCoupling, SplineCoupling, LoftTransform
+
+keys = jax.random.split(key, 4)
+mask0 = make_alternating_mask(dim=4, parity=0)
+mask1 = make_alternating_mask(dim=4, parity=1)
+
+# Mix affine and spline couplings
+blocks_and_params = [
+    AffineCoupling.create(keys[0], dim=4, mask=mask0, hidden_dim=64, n_hidden_layers=2),
+    AffineCoupling.create(keys[1], dim=4, mask=mask1, hidden_dim=64, n_hidden_layers=2),
+    SplineCoupling.create(keys[2], dim=4, mask=mask0, hidden_dim=64, n_hidden_layers=2, num_bins=8),
+    LoftTransform.create(keys[3], dim=4),
+]
+
+bijection, params = assemble_bijection(blocks_and_params)
+```
+
+See [USAGE.md](USAGE.md) for more examples including context and feature extractors.
+
 ## Architecture
 
 ### Core Components
