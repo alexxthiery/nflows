@@ -150,6 +150,7 @@ def build_realnvp(
     res_scale: float = 0.1,
     use_permutation: bool = False,
     use_linear: bool = False,
+    use_loft: bool = True,
     trainable_base: bool = False,
     base_dist: Any | None = None,
     base_params: Any | None = None,
@@ -195,6 +196,7 @@ def build_realnvp(
       use_permutation: If True, insert a fixed reverse permutation between
                        successive coupling layers.
       use_linear: If True, add a global LinearTransform at the start of the flow.
+      use_loft: If True (default), append a LoftTransform at the end for tail stabilization.
 
       trainable_base: If True and base_dist is None, use a DiagNormal base with
                       trainable loc and log_scale. Ignored if base_dist is given.
@@ -282,11 +284,12 @@ def build_realnvp(
             blocks.append(perm_block)
             block_params.append(perm_params)
 
-    # add the final LOFT transform
-    key, loft_key = jax.random.split(key)
-    loft_block, loft_params = LoftTransform.create(loft_key, dim=dim, tau=loft_tau)
-    blocks.append(loft_block)
-    block_params.append(loft_params)
+    # Optional final LOFT transform for tail stabilization
+    if use_loft:
+        key, loft_key = jax.random.split(key)
+        loft_block, loft_params = LoftTransform.create(loft_key, dim=dim, tau=loft_tau)
+        blocks.append(loft_block)
+        block_params.append(loft_params)
 
     transform = CompositeTransform(blocks=blocks)
     
@@ -326,6 +329,7 @@ def build_spline_realnvp(
     res_scale: float = 0.1,
     use_permutation: bool = False,
     use_linear: bool = False,
+    use_loft: bool = True,
     trainable_base: bool = False,
     base_dist: Any | None = None,
     base_params: Any | None = None,
@@ -387,6 +391,7 @@ def build_spline_realnvp(
 
       use_permutation: If True, insert a fixed reverse permutation between successive couplings.
       use_linear: If True, add a global LinearTransform at the start of the flow.
+      use_loft: If True (default), append a LoftTransform at the end for tail stabilization.
 
       trainable_base: If True and base_dist is None, use a DiagNormal base with trainable params.
       base_dist: Optional explicit base distribution object; takes precedence over trainable_base.
@@ -487,12 +492,12 @@ def build_spline_realnvp(
             blocks.append(perm_block)
             block_params.append(perm_params)
 
-    # Final LOFT transform (same as build_realnvp)
-    # It is used for stabilizing training in high-dimensional settings.
-    key, loft_key = jax.random.split(key)
-    loft_block, loft_params = LoftTransform.create(loft_key, dim=dim, tau=loft_tau)
-    blocks.append(loft_block)
-    block_params.append(loft_params)
+    # Optional final LOFT transform for tail stabilization
+    if use_loft:
+        key, loft_key = jax.random.split(key)
+        loft_block, loft_params = LoftTransform.create(loft_key, dim=dim, tau=loft_tau)
+        blocks.append(loft_block)
+        block_params.append(loft_params)
 
     transform = CompositeTransform(blocks=blocks)
 
