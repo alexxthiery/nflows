@@ -1,7 +1,7 @@
 # nflows/transforms.py
 from __future__ import annotations
 
-import inspect
+import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, List, Sequence, Tuple
 
@@ -187,7 +187,7 @@ class LinearTransform:
         log_det_inverse = jnp.broadcast_to(-log_det_scalar, batch_shape)
         return x, log_det_inverse
 
-    def init_params(self, key: PRNGKey) -> dict:
+    def init_params(self, key: PRNGKey, context_dim: int = 0) -> dict:
         """
         Initialize parameters for this transform.
 
@@ -195,11 +195,12 @@ class LinearTransform:
 
         Arguments:
             key: JAX PRNGKey (unused, included for interface consistency).
+            context_dim: Context dimension (unused, included for interface consistency).
 
         Returns:
             Dict with keys 'lower', 'upper', 'log_diag'.
         """
-        del key  # Unused for deterministic identity init.
+        del key, context_dim  # Unused for deterministic identity init.
         return {
             "lower": jnp.zeros((self.dim, self.dim), dtype=jnp.float32),
             "upper": jnp.zeros((self.dim, self.dim), dtype=jnp.float32),
@@ -410,7 +411,7 @@ class AffineCoupling:
         )
 
         # Initialize params
-        params = coupling.init_params(key)
+        params = coupling.init_params(key, context_dim=context_dim)
 
         return coupling, params
 
@@ -519,7 +520,7 @@ class AffineCoupling:
         log_det = -jnp.sum(log_scale, axis=-1)
         return x, log_det
 
-    def init_params(self, key: PRNGKey, context_dim: int | None = None) -> dict:
+    def init_params(self, key: PRNGKey, context_dim: int = 0) -> dict:
         """
         Initialize parameters for this transform.
 
@@ -528,15 +529,11 @@ class AffineCoupling:
 
         Arguments:
             key: JAX PRNGKey for parameter initialization.
-            context_dim: Context dimension. If None, inferred from conditioner.context_dim.
+            context_dim: Context dimension (0 for unconditional).
 
         Returns:
             Dict with key 'mlp' containing MLP parameters.
         """
-        # Infer context_dim from conditioner if not provided
-        if context_dim is None:
-            context_dim = self.conditioner.context_dim
-
         dummy_x = jnp.zeros((1, self.dim), dtype=jnp.float32)
         dummy_context = jnp.zeros((1, context_dim), dtype=jnp.float32) if context_dim > 0 else None
         variables = self.conditioner.init(key, dummy_x, dummy_context)
@@ -622,6 +619,15 @@ class SplineCoupling:
             )
         # Validate conditioner interface.
         validate_conditioner(self.conditioner, name="SplineCoupling.conditioner")
+
+        # Warn if identity-like initialization is not possible.
+        lo, hi = float(self.min_derivative), float(self.max_derivative)
+        if not (lo < 1.0 < hi):
+            warnings.warn(
+                f"SplineCoupling: derivative range [{lo}, {hi}] excludes 1.0; "
+                "identity-like initialization not possible, using midpoint derivative.",
+                stacklevel=2
+            )
 
     @staticmethod
     def required_out_dim(dim: int, num_bins: int) -> int:
@@ -733,7 +739,7 @@ class SplineCoupling:
         )
 
         # Initialize params
-        params = coupling.init_params(key)
+        params = coupling.init_params(key, context_dim=context_dim)
 
         return coupling, params
 
@@ -939,7 +945,7 @@ class SplineCoupling:
 
         return self.conditioner.set_output_layer(mlp_params, new_kernel, new_bias)
 
-    def init_params(self, key: PRNGKey, context_dim: int | None = None) -> dict:
+    def init_params(self, key: PRNGKey, context_dim: int = 0) -> dict:
         """
         Initialize parameters for this transform.
 
@@ -947,15 +953,11 @@ class SplineCoupling:
 
         Arguments:
             key: JAX PRNGKey for parameter initialization.
-            context_dim: Context dimension. If None, inferred from conditioner.context_dim.
+            context_dim: Context dimension (0 for unconditional).
 
         Returns:
             Dict with key 'mlp' containing MLP parameters.
         """
-        # Infer context_dim from conditioner if not provided
-        if context_dim is None:
-            context_dim = self.conditioner.context_dim
-
         dim = int(self.mask.shape[0])
         dummy_x = jnp.zeros((1, dim), dtype=jnp.float32)
         dummy_context = jnp.zeros((1, context_dim), dtype=jnp.float32) if context_dim > 0 else None
@@ -1051,7 +1053,7 @@ class Permutation:
         log_det = jnp.zeros(y.shape[:-1], dtype=y.dtype)
         return x, log_det
 
-    def init_params(self, key: PRNGKey) -> dict:
+    def init_params(self, key: PRNGKey, context_dim: int = 0) -> dict:
         """
         Initialize parameters for this transform.
 
@@ -1059,11 +1061,12 @@ class Permutation:
 
         Arguments:
             key: JAX PRNGKey (unused).
+            context_dim: Context dimension (unused, included for interface consistency).
 
         Returns:
             Empty dict.
         """
-        del key  # Unused.
+        del key, context_dim  # Unused.
         return {}
 
     @classmethod
@@ -1203,11 +1206,7 @@ class CompositeTransform:
         params = []
         for k, block in zip(keys, self.blocks):
             if hasattr(block, "init_params"):
-                sig = inspect.signature(block.init_params)
-                if "context_dim" in sig.parameters:
-                    p = block.init_params(k, context_dim=context_dim)
-                else:
-                    p = block.init_params(k)
+                p = block.init_params(k, context_dim=context_dim)
                 params.append(p)
             else:
                 params.append({})
@@ -1337,7 +1336,7 @@ class LoftTransform:
 
         return x, log_det_inverse
 
-    def init_params(self, key: PRNGKey) -> dict:
+    def init_params(self, key: PRNGKey, context_dim: int = 0) -> dict:
         """
         Initialize parameters for this transform.
 
@@ -1345,11 +1344,12 @@ class LoftTransform:
 
         Arguments:
             key: JAX PRNGKey (unused).
+            context_dim: Context dimension (unused, included for interface consistency).
 
         Returns:
             Empty dict.
         """
-        del key  # Unused.
+        del key, context_dim  # Unused.
         return {}
 
     @classmethod

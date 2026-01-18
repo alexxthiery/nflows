@@ -82,6 +82,7 @@ embedding improves conditioning (e.g., high-dimensional contexts, heterogeneous 
 | `trainable_base` | False | Use DiagNormal base with learnable loc/scale |
 | `use_linear` | False | Add global LU linear transform at start |
 | `use_permutation` | False | Insert reverse permutations between couplings |
+| `use_loft` | True | Append LoftTransform at end for tail stabilization |
 | `max_log_scale` | 5.0 | Bound on affine coupling scale (stability) |
 | `loft_tau` | 1000.0 | LOFT threshold for tail stabilization |
 | `activation` | tanh | Conditioner MLP activation |

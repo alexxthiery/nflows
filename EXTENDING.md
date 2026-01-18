@@ -21,9 +21,21 @@ def inverse(params, y, context=None) -> (x, log_det)
 ### Optional Methods
 
 ```python
-def init_params(key) -> params        # Initialize parameters
+def init_params(key, context_dim=0) -> params     # Initialize parameters
 @classmethod
 def create(cls, key, ...) -> (transform, params)  # Factory method
+```
+
+**Important:** All transforms must use the signature `init_params(key, context_dim=0)`.
+Transforms that don't use `context_dim` should accept but ignore the argument.
+This ensures uniform interface for `CompositeTransform`.
+
+Example for a parameter-free transform:
+
+```python
+def init_params(self, key, context_dim=0):
+    del key, context_dim  # Unused
+    return {}
 ```
 
 ### Templates
@@ -109,6 +121,10 @@ def set_output_layer(params, kernel, bias) -> params
 If present, coupling layers will automatically initialize the output layer:
 - `AffineCoupling`: Zero-initializes for identity start
 - `SplineCoupling`: Sets biases for identity spline (raises error if methods missing)
+
+**Note:** `SplineCoupling` emits a warning if the derivative range `[min_derivative, max_derivative]`
+does not contain 1.0, since identity-like initialization requires `derivative ≈ 1`. In this case,
+the midpoint derivative is used instead.
 
 ### Template
 
