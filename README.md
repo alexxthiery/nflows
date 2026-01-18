@@ -91,13 +91,41 @@ flow, params = build_spline_realnvp(
 )
 ```
 
+### Transform-Only Mode (Bijection)
+
+When you only need the invertible transform without a base distribution:
+
+```python
+from nflows.builders import build_realnvp
+
+# Get just the bijection (no base distribution)
+bijection, params = build_realnvp(
+    key,
+    dim=4,
+    num_layers=4,
+    hidden_dim=64,
+    n_hidden_layers=2,
+    context_dim=2,              # Works with context
+    return_transform_only=True,  # Return Bijection instead of Flow
+)
+
+# Forward/inverse with tractable Jacobian
+x = jax.random.normal(key, (100, 4))
+context = jax.random.normal(key, (100, 2))
+
+y, log_det = bijection.forward(params, x, context=context)
+x_rec, _   = bijection.inverse(params, y, context=context)
+```
+
+Use cases: change of variables, learned coordinate transforms, custom base distributions.
+
 ## Architecture
 
 ### Core Components
 
 | Module | Description |
 |--------|-------------|
-| `flows.py` | `Flow` class with `sample`, `log_prob`, `forward`, `inverse` |
+| `flows.py` | `Flow` class with `sample`, `log_prob`, `forward`, `inverse`; `Bijection` for transform-only use |
 | `transforms.py` | Invertible transforms: `AffineCoupling`, `SplineCoupling`, `LinearTransform`, `Permutation`, `LoftTransform`, `CompositeTransform` |
 | `distributions.py` | Base distributions: `StandardNormal`, `DiagNormal` |
 | `nets.py` | Conditioner networks: `MLP` with optional context |

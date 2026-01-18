@@ -12,6 +12,82 @@ PRNGKey = jax.Array  # JAX random key alias
 
 
 @dataclass
+class Bijection:
+    """
+    Invertible transformation with tractable Jacobian, optionally conditioned on context.
+
+    This is a lightweight wrapper that composes a transform with an optional
+    context feature extractor. Unlike Flow, it does not define a probability
+    distribution—just the forward/inverse maps.
+
+    Use cases:
+      - Change of variables in integration
+      - Learned coordinate transformations
+      - Composing with custom base distributions
+      - Reparameterization tricks
+
+    Parameters structure:
+      params["transform"]         -> parameters for the transform
+      params["feature_extractor"] -> parameters for context feature extractor (if used)
+
+    This class only stores the *definitions* of transform and feature_extractor.
+    It does not store any trainable parameters.
+    """
+    transform: Any
+    feature_extractor: Any = None
+
+    def _extract_context_features(self, params: Any, context: Array | None) -> Array | None:
+        """
+        Extract features from context using the feature extractor if available.
+
+        Arguments:
+          params: PyTree that may contain "feature_extractor" key.
+          context: raw context tensor, or None.
+
+        Returns:
+          Extracted context features, or original context if no extractor.
+        """
+        if self.feature_extractor is None or context is None:
+            return context
+        fe_params = params["feature_extractor"]
+        return self.feature_extractor.apply({"params": fe_params}, context)
+
+    def forward(self, params: Any, x: Array, context: Array | None = None) -> Tuple[Array, Array]:
+        """
+        Forward map: x -> y.
+
+        Arguments:
+          params: PyTree with key "transform" (and optionally "feature_extractor").
+          x: input samples, shape (..., dim).
+          context: optional conditioning tensor, shape (..., context_dim).
+
+        Returns:
+          y: transformed samples, shape (..., dim).
+          log_det: log |det ∂y/∂x|, shape (...,).
+        """
+        context_features = self._extract_context_features(params, context)
+        transform_params = params["transform"]
+        return self.transform.forward(transform_params, x, context_features)
+
+    def inverse(self, params: Any, y: Array, context: Array | None = None) -> Tuple[Array, Array]:
+        """
+        Inverse map: y -> x.
+
+        Arguments:
+          params: PyTree with key "transform" (and optionally "feature_extractor").
+          y: transformed samples, shape (..., dim).
+          context: optional conditioning tensor, shape (..., context_dim).
+
+        Returns:
+          x: original samples, shape (..., dim).
+          log_det: log |det ∂x/∂y|, shape (...,).
+        """
+        context_features = self._extract_context_features(params, context)
+        transform_params = params["transform"]
+        return self.transform.inverse(transform_params, y, context_features)
+
+
+@dataclass
 class Flow:
     """
     Normalizing flow distribution.

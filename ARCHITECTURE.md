@@ -13,14 +13,39 @@ The `Flow` class composes these and provides:
 - `log_prob(params, x)` — compute density via inverse transform + change of variables
 - `sample_and_log_prob(params, key, shape)` — efficient combined operation for VI
 
+### Transform-Only Mode (Bijection)
+
+Sometimes you only need the invertible transform with tractable Jacobian, without a base
+distribution. Use `return_transform_only=True` to get a `Bijection` instead of a `Flow`:
+
+```python
+bijection, params = build_realnvp(..., return_transform_only=True)
+
+y, log_det = bijection.forward(params, x, context=ctx)
+x_rec, _   = bijection.inverse(params, y, context=ctx)
+```
+
+Use cases:
+- Change of variables in integration
+- Learned coordinate transformations
+- Composing with custom base distributions
+- Reparameterization tricks
+
 ## Parameter Convention
 
 All parameters are explicit PyTrees passed to methods (no params stored in objects):
 
 ```python
+# Flow params
 params = {
     "base": {...},       # base distribution params (or {} for StandardNormal)
     "transform": [...],  # list of per-block params
+}
+
+# Bijection params (return_transform_only=True)
+params = {
+    "transform": [...],  # list of per-block params
+    # "feature_extractor": {...}  # only if context_extractor_hidden_dim > 0
 }
 ```
 
@@ -89,3 +114,4 @@ embedding improves conditioning (e.g., high-dimensional contexts, heterogeneous 
 | `context_extractor_hidden_dim` | 0 | Hidden dim for context feature extractor (0 = disabled) |
 | `context_extractor_n_layers` | 2 | Residual blocks in context extractor |
 | `context_feature_dim` | None | Output dim of extractor (default: same as `context_dim`) |
+| `return_transform_only` | False | Return `Bijection` instead of `Flow` (no base distribution) |

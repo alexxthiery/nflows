@@ -9,7 +9,7 @@ import jax.numpy as jnp
 from .nets import init_resnet, Array, PRNGKey
 from .distributions import StandardNormal, DiagNormal
 from .transforms import AffineCoupling, Permutation, CompositeTransform, LinearTransform, LoftTransform, SplineCoupling
-from .flows import Flow
+from .flows import Bijection, Flow
 
 
 # ====================================================================
@@ -156,7 +156,8 @@ def build_realnvp(
     base_params: Any | None = None,
     activation: Callable[[Array], Array] = jax.nn.tanh,
     loft_tau: float = 1000.0,
-) -> Tuple[Flow, Any]:
+    return_transform_only: bool = False,
+) -> Tuple[Flow | Bijection, Any]:
     """
     Construct a RealNVP-style flow with affine coupling layers.
 
@@ -210,10 +211,17 @@ def build_realnvp(
                        {"loc": zeros(dim), "log_scale": zeros(dim)}.
       activation: Activation function for conditioner MLPs.
       loft_tau: Threshold parameter for LOFT (stabilizing transform) in the affine coupling.
+      return_transform_only: If True, return a Bijection (transform + optional feature
+                   extractor) instead of a full Flow. Useful when you only need the
+                   invertible map with tractable Jacobian, without a base distribution.
 
     Returns:
-      flow: Flow object (definition only, no parameters inside).
-      params: PyTree of parameters for the flow (including base and transform).
+      If return_transform_only=False (default):
+        flow: Flow object (definition only, no parameters inside).
+        params: PyTree with keys "base", "transform", and optionally "feature_extractor".
+      If return_transform_only=True:
+        bijection: Bijection object (transform + optional feature extractor).
+        params: PyTree with keys "transform" and optionally "feature_extractor".
     """
     if dim <= 0:
         raise ValueError(f"build_realnvp: dim must be positive, got {dim}.")
@@ -237,10 +245,11 @@ def build_realnvp(
         context_feature_dim, activation, res_scale,
     )
 
-    # Base distribution
-    base, base_params_resolved = _resolve_base_distribution(
-        dim, trainable_base, base_dist, base_params
-    )
+    # Base distribution (skip if only returning transform)
+    if not return_transform_only:
+        base, base_params_resolved = _resolve_base_distribution(
+            dim, trainable_base, base_dist, base_params
+        )
 
     # --------------------------------------------------------------
     # Transform: stack of affine couplings (and optional permutations)
@@ -292,16 +301,22 @@ def build_realnvp(
         block_params.append(loft_params)
 
     transform = CompositeTransform(blocks=blocks)
-    
+
     # Analyze mask coverage to catch potential issues.
     analyze_mask_coverage(blocks, dim)
+
+    # Build params and return object based on return_transform_only
+    if return_transform_only:
+        params = {"transform": block_params}
+        if feature_extractor is not None:
+            params["feature_extractor"] = fe_params
+        bijection = Bijection(transform=transform, feature_extractor=feature_extractor)
+        return bijection, params
 
     params = {
         "base": base_params_resolved,
         "transform": block_params,
     }
-
-    # Add feature extractor params if used.
     if feature_extractor is not None:
         params["feature_extractor"] = fe_params
 
@@ -335,7 +350,8 @@ def build_spline_realnvp(
     base_params: Any | None = None,
     activation: Callable[[Array], Array] = jax.nn.tanh,
     loft_tau: float = 1000.0,
-) -> Tuple[Flow, Any]:
+    return_transform_only: bool = False,
+) -> Tuple[Flow | Bijection, Any]:
     """
     Construct a RealNVP-style flow with monotonic rational-quadratic spline coupling layers
     (Durkan et al., 2019).
@@ -401,10 +417,17 @@ def build_spline_realnvp(
 
       activation: Activation function for conditioner MLPs.
       loft_tau: Threshold parameter for LOFT (stabilizing transform) appended at the end.
+      return_transform_only: If True, return a Bijection (transform + optional feature
+                   extractor) instead of a full Flow. Useful when you only need the
+                   invertible map with tractable Jacobian, without a base distribution.
 
     Returns:
-      flow: Flow object (definition only, no parameters inside).
-      params: PyTree of parameters for the flow (including base and transform).
+      If return_transform_only=False (default):
+        flow: Flow object (definition only, no parameters inside).
+        params: PyTree with keys "base", "transform", and optionally "feature_extractor".
+      If return_transform_only=True:
+        bijection: Bijection object (transform + optional feature extractor).
+        params: PyTree with keys "transform" and optionally "feature_extractor".
     """
     if dim <= 0:
         raise ValueError(f"build_spline_realnvp: dim must be positive, got {dim}.")
@@ -442,10 +465,11 @@ def build_spline_realnvp(
         context_feature_dim, activation, res_scale,
     )
 
-    # Base distribution
-    base, base_params_resolved = _resolve_base_distribution(
-        dim, trainable_base, base_dist, base_params
-    )
+    # Base distribution (skip if only returning transform)
+    if not return_transform_only:
+        base, base_params_resolved = _resolve_base_distribution(
+            dim, trainable_base, base_dist, base_params
+        )
 
     # --------------------------------------------------------------
     # Transform: stack of spline couplings (and optional permutations)
@@ -505,12 +529,18 @@ def build_spline_realnvp(
     # Issues can arise due to permutations canceling out masks.
     analyze_mask_coverage(blocks, dim)
 
+    # Build params and return object based on return_transform_only
+    if return_transform_only:
+        params = {"transform": block_params}
+        if feature_extractor is not None:
+            params["feature_extractor"] = fe_params
+        bijection = Bijection(transform=transform, feature_extractor=feature_extractor)
+        return bijection, params
+
     params = {
         "base": base_params_resolved,
         "transform": block_params,
     }
-
-    # Add feature extractor params if used.
     if feature_extractor is not None:
         params["feature_extractor"] = fe_params
 

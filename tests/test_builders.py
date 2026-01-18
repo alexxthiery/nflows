@@ -12,6 +12,7 @@ from nflows.builders import (
     analyze_mask_coverage,
     _make_alternating_mask,
 )
+from nflows.flows import Bijection
 from nflows.transforms import Permutation, LinearTransform, LoftTransform
 from nflows.distributions import DiagNormal, StandardNormal
 
@@ -328,3 +329,120 @@ class TestAnalyzeMaskCoverage:
 
         with pytest.raises(ValueError, match="never transformed"):
             analyze_mask_coverage(blocks, dim=dim)
+
+
+# ============================================================================
+# return_transform_only / Bijection Tests
+# ============================================================================
+class TestReturnTransformOnly:
+    """Tests for return_transform_only parameter and Bijection class."""
+
+    def test_realnvp_returns_bijection(self, key, dim):
+        """return_transform_only=True returns Bijection instead of Flow."""
+        bijection, params = build_realnvp(
+            key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1,
+            return_transform_only=True,
+        )
+
+        assert isinstance(bijection, Bijection)
+        assert "transform" in params
+        assert "base" not in params
+
+    def test_spline_realnvp_returns_bijection(self, key, dim):
+        """return_transform_only=True returns Bijection for spline flow."""
+        bijection, params = build_spline_realnvp(
+            key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1,
+            num_bins=4, return_transform_only=True,
+        )
+
+        assert isinstance(bijection, Bijection)
+        assert "transform" in params
+        assert "base" not in params
+
+    def test_bijection_forward_inverse(self, key, dim):
+        """Bijection forward/inverse work correctly."""
+        bijection, params = build_realnvp(
+            key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1,
+            return_transform_only=True,
+        )
+
+        x = jax.random.normal(key, (10, dim))
+        y, ld_fwd = bijection.forward(params, x)
+        x_rec, ld_inv = bijection.inverse(params, y)
+
+        assert y.shape == x.shape
+        assert ld_fwd.shape == (10,)
+        assert jnp.abs(x - x_rec).max() < 1e-4
+        assert jnp.abs(ld_fwd + ld_inv).max() < 1e-4
+
+    def test_bijection_with_context(self, key, dim, context_dim):
+        """Bijection works with context."""
+        bijection, params = build_realnvp(
+            key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1,
+            context_dim=context_dim, return_transform_only=True,
+        )
+
+        x = jax.random.normal(key, (10, dim))
+        ctx = jax.random.normal(key, (10, context_dim))
+
+        y, ld_fwd = bijection.forward(params, x, context=ctx)
+        x_rec, ld_inv = bijection.inverse(params, y, context=ctx)
+
+        assert y.shape == x.shape
+        assert jnp.abs(x - x_rec).max() < 1e-4
+
+    def test_bijection_with_feature_extractor(self, key, dim, context_dim):
+        """Bijection works with context feature extractor."""
+        bijection, params = build_realnvp(
+            key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1,
+            context_dim=context_dim,
+            context_extractor_hidden_dim=16,
+            context_extractor_n_layers=1,
+            return_transform_only=True,
+        )
+
+        assert bijection.feature_extractor is not None
+        assert "feature_extractor" in params
+        assert "transform" in params
+        assert "base" not in params
+
+        x = jax.random.normal(key, (10, dim))
+        ctx = jax.random.normal(key, (10, context_dim))
+
+        y, ld_fwd = bijection.forward(params, x, context=ctx)
+        x_rec, ld_inv = bijection.inverse(params, y, context=ctx)
+
+        assert y.shape == x.shape
+        assert jnp.abs(x - x_rec).max() < 1e-4
+
+    def test_spline_bijection_invertibility(self, key, dim):
+        """Spline Bijection is invertible."""
+        bijection, params = build_spline_realnvp(
+            key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1,
+            num_bins=4, return_transform_only=True,
+        )
+
+        x = jax.random.normal(key, (10, dim))
+        y, ld_fwd = bijection.forward(params, x)
+        x_rec, ld_inv = bijection.inverse(params, y)
+
+        assert jnp.abs(x - x_rec).max() < 1e-3
+        assert jnp.abs(ld_fwd + ld_inv).max() < 1e-3
+
+    def test_bijection_jit_compatible(self, key, dim):
+        """Bijection is JIT-compatible."""
+        bijection, params = build_realnvp(
+            key, dim=dim, num_layers=2, hidden_dim=8, n_hidden_layers=1,
+            return_transform_only=True,
+        )
+
+        @jax.jit
+        def forward_jit(p, x):
+            return bijection.forward(p, x)
+
+        x = jax.random.normal(key, (10, dim))
+        y, ld = forward_jit(params, x)
+
+        assert y.shape == x.shape
+        assert not jnp.isnan(y).any()
+        assert not jnp.isnan(ld).any()
