@@ -897,6 +897,58 @@ class TestCustomConditionerWithRequiredOutDim:
         assert y.shape == x.shape
 
 
+class TestConditionerInterfaceFallback:
+    """Tests for conditioner interface fallback behavior."""
+
+    def test_affine_coupling_skips_init_without_interface(self, key, dim):
+        """AffineCoupling skips auto-init if conditioner lacks interface methods."""
+        from flax import linen as nn
+
+        # Minimal conditioner without get_output_layer/set_output_layer
+        class MinimalConditioner(nn.Module):
+            out_dim: int
+            context_dim: int = 0
+
+            @nn.compact
+            def __call__(self, x, context=None):
+                return nn.Dense(self.out_dim)(x)
+
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        out_dim = AffineCoupling.required_out_dim(dim)
+        conditioner = MinimalConditioner(out_dim=out_dim)
+
+        coupling = AffineCoupling(mask=mask, conditioner=conditioner)
+        params = coupling.init_params(key)
+
+        # Should work without error (skips auto-init)
+        x = jax.random.normal(key, (10, dim))
+        y, ld = coupling.forward(params, x)
+        assert y.shape == x.shape
+
+    def test_spline_coupling_raises_without_interface(self, key, dim):
+        """SplineCoupling raises error if conditioner lacks interface methods."""
+        from flax import linen as nn
+
+        # Minimal conditioner without get_output_layer/set_output_layer
+        class MinimalConditioner(nn.Module):
+            out_dim: int
+            context_dim: int = 0
+
+            @nn.compact
+            def __call__(self, x, context=None):
+                return nn.Dense(self.out_dim)(x)
+
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        num_bins = 8
+        out_dim = SplineCoupling.required_out_dim(dim, num_bins)
+        conditioner = MinimalConditioner(out_dim=out_dim)
+
+        coupling = SplineCoupling(mask=mask, conditioner=conditioner, num_bins=num_bins)
+
+        with pytest.raises(RuntimeError, match="get_output_layer.*set_output_layer"):
+            coupling.init_params(key)
+
+
 # ============================================================================
 # Factory Tests for Simple Transforms (LinearTransform, Permutation, LoftTransform)
 # ============================================================================

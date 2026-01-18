@@ -1,4 +1,27 @@
 # nflows/nets.py
+"""
+Neural network modules for normalizing flow conditioners.
+
+Conditioner Interface
+---------------------
+Conditioners used with coupling layers (AffineCoupling, SplineCoupling) should
+implement the following interface:
+
+Required:
+    - ``apply({"params": params}, x, context) -> output`` (Flax convention)
+    - ``context_dim: int`` attribute (0 for unconditional)
+
+Optional (enables automatic output layer initialization):
+    - ``get_output_layer(params) -> {"kernel": Array, "bias": Array}``
+    - ``set_output_layer(params, kernel, bias) -> params``
+
+If the optional methods are present, coupling layers will automatically
+zero-initialize (AffineCoupling) or identity-initialize (SplineCoupling)
+the output layer for stable training. If missing, AffineCoupling skips
+auto-init; SplineCoupling raises an error.
+
+The built-in MLP and ResNet classes implement the full interface.
+"""
 from __future__ import annotations
 
 from typing import Callable, Tuple
@@ -63,6 +86,34 @@ class ResNet(nn.Module):
         # 3. Output projection.
         out = nn.Dense(self.out_dim, name="dense_out")(h)
         return out
+
+    def get_output_layer(self, params: dict) -> dict:
+        """
+        Return output layer parameters.
+
+        Arguments:
+            params: Parameter dict for this ResNet.
+
+        Returns:
+            Dict with "kernel" and "bias" arrays for the output layer.
+        """
+        return params["dense_out"]
+
+    def set_output_layer(self, params: dict, kernel: Array, bias: Array) -> dict:
+        """
+        Return new params with output layer replaced.
+
+        Arguments:
+            params: Parameter dict for this ResNet.
+            kernel: New kernel array for output layer.
+            bias: New bias array for output layer.
+
+        Returns:
+            New parameter dict (original unchanged).
+        """
+        new_params = dict(params)
+        new_params["dense_out"] = {"kernel": kernel, "bias": bias}
+        return new_params
 
 
 class MLP(nn.Module):
@@ -144,6 +195,36 @@ class MLP(nn.Module):
         )
         return net(inp)
 
+    def get_output_layer(self, params: dict) -> dict:
+        """
+        Return output layer parameters.
+
+        Arguments:
+            params: Parameter dict for this MLP.
+
+        Returns:
+            Dict with "kernel" and "bias" arrays for the output layer.
+        """
+        return params["net"]["dense_out"]
+
+    def set_output_layer(self, params: dict, kernel: Array, bias: Array) -> dict:
+        """
+        Return new params with output layer replaced.
+
+        Arguments:
+            params: Parameter dict for this MLP.
+            kernel: New kernel array for output layer.
+            bias: New bias array for output layer.
+
+        Returns:
+            New parameter dict (original unchanged).
+        """
+        new_net = dict(params["net"])
+        new_net["dense_out"] = {"kernel": kernel, "bias": bias}
+        new_params = dict(params)
+        new_params["net"] = new_net
+        return new_params
+
 
 def init_mlp(
     key: PRNGKey,
@@ -194,23 +275,13 @@ def init_mlp(
     dummy_context = jnp.zeros((B, context_dim), dtype=jnp.float32) if context_dim > 0 else None
     variables = mlp.init(key, dummy_x, dummy_context)
 
-    # Copy params to mutable dict for zero-init of final layer.
-    raw_params = variables.get("params", {})
-    params = dict(raw_params)
+    params = variables.get("params", {})
 
-    # Zero-initialize the final Dense layer for identity-start flows.
-    # Params are nested under "net" (the ResNet submodule).
-    if "net" not in params or "dense_out" not in params["net"]:
-        raise KeyError(
-            "init_mlp expected a 'net/dense_out' parameter collection in the MLP; "
-            "check the MLP implementation if this error occurs."
-        )
-    net_params = dict(params["net"])
-    dense_out = dict(net_params["dense_out"])
-    dense_out["kernel"] = jnp.zeros_like(dense_out["kernel"])
-    dense_out["bias"] = jnp.zeros_like(dense_out["bias"])
-    net_params["dense_out"] = dense_out
-    params["net"] = net_params
+    # Zero-initialize the output layer for identity-start flows.
+    out_layer = mlp.get_output_layer(params)
+    kernel = jnp.zeros_like(out_layer["kernel"])
+    bias = jnp.zeros_like(out_layer["bias"])
+    params = mlp.set_output_layer(params, kernel, bias)
 
     return mlp, params
 
@@ -254,19 +325,13 @@ def init_resnet(
     dummy_x = jnp.zeros((1, in_dim), dtype=jnp.float32)
     variables = resnet.init(key, dummy_x)
 
-    raw_params = variables.get("params", {})
-    params = dict(raw_params)
+    params = variables.get("params", {})
 
     # Optionally zero-initialize the output layer.
     if zero_init_output:
-        if "dense_out" not in params:
-            raise KeyError(
-                "init_resnet expected a 'dense_out' parameter collection; "
-                "check the ResNet implementation if this error occurs."
-            )
-        dense_out = dict(params["dense_out"])
-        dense_out["kernel"] = jnp.zeros_like(dense_out["kernel"])
-        dense_out["bias"] = jnp.zeros_like(dense_out["bias"])
-        params["dense_out"] = dense_out
+        out_layer = resnet.get_output_layer(params)
+        kernel = jnp.zeros_like(out_layer["kernel"])
+        bias = jnp.zeros_like(out_layer["bias"])
+        params = resnet.set_output_layer(params, kernel, bias)
 
     return resnet, params

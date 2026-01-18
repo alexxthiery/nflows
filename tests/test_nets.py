@@ -155,6 +155,39 @@ class TestResNet:
 
         assert jnp.allclose(out1, out2)
 
+    def test_get_output_layer(self, key):
+        """get_output_layer returns correct structure and shapes."""
+        resnet, params = init_resnet(
+            key, in_dim=4, hidden_dim=16, out_dim=5, n_hidden_layers=2
+        )
+        out_layer = resnet.get_output_layer(params)
+
+        assert "kernel" in out_layer
+        assert "bias" in out_layer
+        assert out_layer["kernel"].shape == (16, 5)  # (hidden_dim, out_dim)
+        assert out_layer["bias"].shape == (5,)  # (out_dim,)
+
+    def test_set_output_layer(self, key):
+        """set_output_layer returns new params, original unchanged."""
+        resnet, params = init_resnet(
+            key, in_dim=4, hidden_dim=16, out_dim=5, n_hidden_layers=2
+        )
+        original_kernel = params["dense_out"]["kernel"].copy()
+        original_bias = params["dense_out"]["bias"].copy()
+
+        new_kernel = jnp.ones((16, 5))
+        new_bias = jnp.ones((5,)) * 2
+
+        new_params = resnet.set_output_layer(params, new_kernel, new_bias)
+
+        # New params have new values
+        assert jnp.allclose(new_params["dense_out"]["kernel"], new_kernel)
+        assert jnp.allclose(new_params["dense_out"]["bias"], new_bias)
+
+        # Original params unchanged
+        assert jnp.allclose(params["dense_out"]["kernel"], original_kernel)
+        assert jnp.allclose(params["dense_out"]["bias"], original_bias)
+
 
 # ---------------------------------------------------------------------------
 # MLP Tests
@@ -303,6 +336,60 @@ class TestMLP:
         out2 = mlp.apply({"params": params}, x)
 
         assert jnp.allclose(out1, out2)
+
+    def test_get_output_layer(self, key):
+        """get_output_layer returns correct structure and shapes."""
+        mlp, params = init_mlp(
+            key, x_dim=4, context_dim=0, hidden_dim=16, n_hidden_layers=2, out_dim=8
+        )
+        out_layer = mlp.get_output_layer(params)
+
+        assert "kernel" in out_layer
+        assert "bias" in out_layer
+        assert out_layer["kernel"].shape == (16, 8)  # (hidden_dim, out_dim)
+        assert out_layer["bias"].shape == (8,)  # (out_dim,)
+
+    def test_set_output_layer(self, key):
+        """set_output_layer returns new params, original unchanged."""
+        mlp, params = init_mlp(
+            key, x_dim=4, context_dim=0, hidden_dim=16, n_hidden_layers=2, out_dim=8
+        )
+        original_kernel = params["net"]["dense_out"]["kernel"].copy()
+        original_bias = params["net"]["dense_out"]["bias"].copy()
+
+        new_kernel = jnp.ones((16, 8))
+        new_bias = jnp.ones((8,)) * 2
+
+        new_params = mlp.set_output_layer(params, new_kernel, new_bias)
+
+        # New params have new values
+        assert jnp.allclose(new_params["net"]["dense_out"]["kernel"], new_kernel)
+        assert jnp.allclose(new_params["net"]["dense_out"]["bias"], new_bias)
+
+        # Original params unchanged
+        assert jnp.allclose(params["net"]["dense_out"]["kernel"], original_kernel)
+        assert jnp.allclose(params["net"]["dense_out"]["bias"], original_bias)
+
+    def test_set_output_layer_forward_works(self, key):
+        """set_output_layer with zeros produces zero output."""
+        mlp, params = init_mlp(
+            key, x_dim=4, context_dim=0, hidden_dim=16, n_hidden_layers=2, out_dim=8
+        )
+        # Perturb params to break zero-init
+        params = jax.tree_util.tree_map(
+            lambda p: p + 0.1 * jax.random.normal(key, p.shape), params
+        )
+
+        # Now set output layer to zeros
+        out_layer = mlp.get_output_layer(params)
+        new_kernel = jnp.zeros_like(out_layer["kernel"])
+        new_bias = jnp.zeros_like(out_layer["bias"])
+        params = mlp.set_output_layer(params, new_kernel, new_bias)
+
+        # Forward should produce zeros
+        x = jax.random.normal(key, (10, 4))
+        out = mlp.apply({"params": params}, x)
+        assert jnp.allclose(out, 0.0, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------

@@ -541,15 +541,12 @@ class AffineCoupling:
         variables = self.conditioner.init(key, dummy_x, dummy_context)
         mlp_params = variables["params"]
 
-        # Zero-init final layer for identity-start. MLP params are nested under "net".
-        if "net" in mlp_params and "dense_out" in mlp_params["net"]:
-            net_params = dict(mlp_params["net"])
-            dense_out = dict(net_params["dense_out"])
-            dense_out["kernel"] = jnp.zeros_like(dense_out["kernel"])
-            dense_out["bias"] = jnp.zeros_like(dense_out["bias"])
-            net_params["dense_out"] = dense_out
-            mlp_params = dict(mlp_params)
-            mlp_params["net"] = net_params
+        # Zero-init final layer for identity-start (if conditioner supports it).
+        if hasattr(self.conditioner, "get_output_layer") and hasattr(self.conditioner, "set_output_layer"):
+            out_layer = self.conditioner.get_output_layer(mlp_params)
+            kernel = jnp.zeros_like(out_layer["kernel"])
+            bias = jnp.zeros_like(out_layer["bias"])
+            mlp_params = self.conditioner.set_output_layer(mlp_params, kernel, bias)
 
         return {"mlp": mlp_params}
 
@@ -881,45 +878,25 @@ class SplineCoupling:
 
         return x, log_det
 
-    def _patch_dense_out(self, mlp_params: Any) -> Any:
+    def _compute_identity_spline_bias(self, out_dim: int) -> Array:
         """
-        Patch MLP final layer for near-identity spline initialization.
+        Compute bias values for near-identity spline initialization.
 
-        Sets kernel to zero and biases such that:
+        Sets biases such that:
           - widths/heights logits → 0 (uniform bins after softmax)
           - derivatives → ~1 (via inverse sigmoid)
 
         Arguments:
-            mlp_params: MLP parameter dict.
+            out_dim: Output dimension of the conditioner.
 
         Returns:
-            Patched MLP parameters.
+            Bias array of shape (out_dim,).
         """
-        # MLP params are nested under "net" (the ResNet submodule).
-        if "net" not in mlp_params or "dense_out" not in mlp_params["net"]:
-            raise KeyError(
-                "SplineCoupling._patch_dense_out: expected mlp_params to contain 'net/dense_out'."
-            )
-
-        dense_out = mlp_params["net"]["dense_out"]
-        if "kernel" not in dense_out or "bias" not in dense_out:
-            raise KeyError(
-                "SplineCoupling._patch_dense_out: expected dense_out to contain 'kernel' and 'bias'."
-            )
-
         dim = int(self.mask.shape[0])
         K = self.num_bins
         params_per_dim = 3 * K - 1
 
-        bias = dense_out["bias"]
-        if bias.shape != (dim * params_per_dim,):
-            raise ValueError(
-                f"SplineCoupling._patch_dense_out: unexpected dense_out bias shape. "
-                f"Expected {(dim * params_per_dim,)}, got {bias.shape}."
-            )
-
-        new_kernel = jnp.zeros_like(dense_out["kernel"])
-        new_bias = jnp.zeros_like(bias).reshape((dim, params_per_dim))
+        new_bias = jnp.zeros((dim, params_per_dim), dtype=jnp.float32)
 
         # For derivatives: min + (max-min)*sigmoid(u0) ≈ 1
         lo = float(self.min_derivative)
@@ -929,18 +906,35 @@ class SplineCoupling:
             u0 = stable_logit(jnp.asarray(alpha, dtype=new_bias.dtype))
             new_bias = new_bias.at[:, 2 * K:].set(u0)
 
-        new_bias = new_bias.reshape((dim * params_per_dim,))
+        return new_bias.reshape((out_dim,))
 
-        # Reconstruct nested structure.
-        new_dense_out = dict(dense_out)
-        new_dense_out["kernel"] = new_kernel
-        new_dense_out["bias"] = new_bias
+    def _patch_dense_out(self, mlp_params: Any) -> Any:
+        """
+        Patch MLP final layer for near-identity spline initialization.
 
-        new_net_params = dict(mlp_params["net"])
-        new_net_params["dense_out"] = new_dense_out
-        new_mlp_params = dict(mlp_params)
-        new_mlp_params["net"] = new_net_params
-        return new_mlp_params
+        Sets kernel to zero and biases for identity spline.
+
+        Arguments:
+            mlp_params: MLP parameter dict.
+
+        Returns:
+            Patched MLP parameters.
+
+        Raises:
+            RuntimeError: If conditioner lacks get_output_layer/set_output_layer methods.
+        """
+        if not (hasattr(self.conditioner, "get_output_layer") and
+                hasattr(self.conditioner, "set_output_layer")):
+            raise RuntimeError(
+                "SplineCoupling._patch_dense_out: conditioner must implement "
+                "get_output_layer() and set_output_layer() methods."
+            )
+
+        out_layer = self.conditioner.get_output_layer(mlp_params)
+        new_kernel = jnp.zeros_like(out_layer["kernel"])
+        new_bias = self._compute_identity_spline_bias(out_layer["bias"].shape[0])
+
+        return self.conditioner.set_output_layer(mlp_params, new_kernel, new_bias)
 
     def init_params(self, key: PRNGKey, context_dim: int | None = None) -> dict:
         """
