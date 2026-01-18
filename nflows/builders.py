@@ -79,6 +79,60 @@ def _make_alternating_mask(dim: int, parity: int) -> Array:
 
 
 # ====================================================================
+# Shared helpers
+# ====================================================================
+def _resolve_base_distribution(dim: int, trainable_base: bool, base_dist, base_params):
+    """
+    Resolve the base distribution and its parameters.
+
+    Returns:
+        (base, base_params_resolved): The distribution object and its parameters.
+    """
+    if base_dist is not None:
+        return base_dist, (base_dist.init_params() if base_params is None else base_params)
+    elif trainable_base:
+        base = DiagNormal(dim=dim)
+        return base, base.init_params()
+    else:
+        base = StandardNormal(dim=dim)
+        return base, base.init_params()
+
+
+def _init_context_extractor(
+    key: PRNGKey,
+    context_dim: int,
+    extractor_hidden_dim: int,
+    extractor_n_layers: int,
+    feature_dim: int | None,
+    activation: Callable[[Array], Array],
+    res_scale: float,
+):
+    """
+    Initialize context feature extractor if extractor_hidden_dim > 0.
+
+    Returns:
+        (feature_extractor, fe_params, effective_context_dim):
+            - feature_extractor: ResNet callable or None
+            - fe_params: Parameters for the extractor or None
+            - effective_context_dim: Dimension of context fed to coupling layers
+    """
+    if extractor_hidden_dim <= 0:
+        return None, None, context_dim
+
+    effective_dim = feature_dim if feature_dim is not None else context_dim
+    feature_extractor, fe_params = init_resnet(
+        key,
+        in_dim=context_dim,
+        hidden_dim=extractor_hidden_dim,
+        out_dim=effective_dim,
+        n_hidden_layers=extractor_n_layers,
+        activation=activation,
+        res_scale=res_scale,
+    )
+    return feature_extractor, fe_params, effective_dim
+
+
+# ====================================================================
 # RealNVP builder
 # ====================================================================
 def build_realnvp(
@@ -170,54 +224,21 @@ def build_realnvp(
             f"build_realnvp: context_dim must be non-negative, got {context_dim}."
         )
 
-    # --------------------------------------------------------------
     # Context feature extractor (optional)
-    # --------------------------------------------------------------
-    use_context_extractor = context_extractor_hidden_dim > 0
-
-    if use_context_extractor:
-        if context_dim == 0:
-            raise ValueError(
-                "build_realnvp: context_extractor_hidden_dim > 0 requires context_dim > 0."
-            )
-        # Determine effective context dimension for coupling MLPs.
-        effective_context_dim = context_feature_dim if context_feature_dim is not None else context_dim
-
-        # Split off a key for the feature extractor.
-        key, fe_key = jax.random.split(key)
-        feature_extractor, fe_params = init_resnet(
-            fe_key,
-            in_dim=context_dim,
-            hidden_dim=context_extractor_hidden_dim,
-            out_dim=effective_context_dim,
-            n_hidden_layers=context_extractor_n_layers,
-            activation=activation,
-            res_scale=res_scale,
+    if context_extractor_hidden_dim > 0 and context_dim == 0:
+        raise ValueError(
+            "build_realnvp: context_extractor_hidden_dim > 0 requires context_dim > 0."
         )
-    else:
-        effective_context_dim = context_dim
-        feature_extractor = None
-        fe_params = None
+    key, fe_key = jax.random.split(key)
+    feature_extractor, fe_params, effective_context_dim = _init_context_extractor(
+        fe_key, context_dim, context_extractor_hidden_dim, context_extractor_n_layers,
+        context_feature_dim, activation, res_scale,
+    )
 
-    # --------------------------------------------------------------
-    # Base distribution and its parameters
-    # --------------------------------------------------------------
-    if base_dist is not None:
-        # User provided an explicit base distribution.
-        # If no params are given, default to an empty dict.
-        base_params_resolved = {} if base_params is None else base_params
-        base = base_dist
-    elif trainable_base:
-        # Convenience: trainable diagonal Gaussian base.
-        base = DiagNormal(dim=dim)
-        base_params_resolved = {
-            "loc": jnp.zeros((dim,), dtype=jnp.float32),
-            "log_scale": jnp.zeros((dim,), dtype=jnp.float32),
-        }
-    else:
-        # Default: standard normal with no trainable parameters.
-        base = StandardNormal(dim=dim)
-        base_params_resolved = {}
+    # Base distribution
+    base, base_params_resolved = _resolve_base_distribution(
+        dim, trainable_base, base_dist, base_params
+    )
 
     # --------------------------------------------------------------
     # Transform: stack of affine couplings (and optional permutations)
@@ -278,11 +299,12 @@ def build_realnvp(
     }
 
     # Add feature extractor params if used.
-    if use_context_extractor:
+    if feature_extractor is not None:
         params["feature_extractor"] = fe_params
 
     flow = Flow(base_dist=base, transform=transform, feature_extractor=feature_extractor)
     return flow, params
+
 
 def build_spline_realnvp(
     key: PRNGKey,
@@ -404,50 +426,21 @@ def build_spline_realnvp(
             f"Got {min_bin_height} * {num_bins} = {min_bin_height * num_bins}."
         )
 
-    # --------------------------------------------------------------
     # Context feature extractor (optional)
-    # --------------------------------------------------------------
-    use_context_extractor = context_extractor_hidden_dim > 0
-
-    if use_context_extractor:
-        if context_dim == 0:
-            raise ValueError(
-                "build_spline_realnvp: context_extractor_hidden_dim > 0 requires context_dim > 0."
-            )
-        # Determine effective context dimension for coupling MLPs.
-        effective_context_dim = context_feature_dim if context_feature_dim is not None else context_dim
-
-        # Split off a key for the feature extractor.
-        key, fe_key = jax.random.split(key)
-        feature_extractor, fe_params = init_resnet(
-            fe_key,
-            in_dim=context_dim,
-            hidden_dim=context_extractor_hidden_dim,
-            out_dim=effective_context_dim,
-            n_hidden_layers=context_extractor_n_layers,
-            activation=activation,
-            res_scale=res_scale,
+    if context_extractor_hidden_dim > 0 and context_dim == 0:
+        raise ValueError(
+            "build_spline_realnvp: context_extractor_hidden_dim > 0 requires context_dim > 0."
         )
-    else:
-        effective_context_dim = context_dim
-        feature_extractor = None
-        fe_params = None
+    key, fe_key = jax.random.split(key)
+    feature_extractor, fe_params, effective_context_dim = _init_context_extractor(
+        fe_key, context_dim, context_extractor_hidden_dim, context_extractor_n_layers,
+        context_feature_dim, activation, res_scale,
+    )
 
-    # --------------------------------------------------------------
-    # Base distribution and its parameters (same logic as build_realnvp)
-    # --------------------------------------------------------------
-    if base_dist is not None:
-        base_params_resolved = {} if base_params is None else base_params
-        base = base_dist
-    elif trainable_base:
-        base = DiagNormal(dim=dim)
-        base_params_resolved = {
-            "loc": jnp.zeros((dim,), dtype=jnp.float32),
-            "log_scale": jnp.zeros((dim,), dtype=jnp.float32),
-        }
-    else:
-        base = StandardNormal(dim=dim)
-        base_params_resolved = {}
+    # Base distribution
+    base, base_params_resolved = _resolve_base_distribution(
+        dim, trainable_base, base_dist, base_params
+    )
 
     # --------------------------------------------------------------
     # Transform: stack of spline couplings (and optional permutations)
@@ -513,7 +506,7 @@ def build_spline_realnvp(
     }
 
     # Add feature extractor params if used.
-    if use_context_extractor:
+    if feature_extractor is not None:
         params["feature_extractor"] = fe_params
 
     flow = Flow(base_dist=base, transform=transform, feature_extractor=feature_extractor)
