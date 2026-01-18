@@ -38,6 +38,17 @@ class StandardNormal:
     def sample(self, params: Any, key: PRNGKey, shape: Tuple[int, ...]) -> Array:
         return jax.random.normal(key, shape=shape + (self.dim,))
 
+    def init_params(self) -> None:
+        """
+        Initialize parameters for this distribution.
+
+        StandardNormal has no learnable parameters.
+
+        Returns:
+            None (this distribution is parameter-free).
+        """
+        return None
+
 
 # ----------------------------------------------------------------------
 # Diagonal Gaussian
@@ -97,3 +108,18 @@ class DiagNormal:
 
         eps = jax.random.normal(key, shape=shape + (self.dim,))
         return loc + eps * scale
+
+    def init_params(self) -> dict:
+        """
+        Initialize parameters for this distribution.
+
+        Returns a dict with 'loc' and 'log_scale' arrays initialized to zeros,
+        corresponding to a standard normal N(0, I).
+
+        Returns:
+            Dict with keys 'loc' (shape (dim,)) and 'log_scale' (shape (dim,)).
+        """
+        return {
+            "loc": jnp.zeros(self.dim),
+            "log_scale": jnp.zeros(self.dim),
+        }

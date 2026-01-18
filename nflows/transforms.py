@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import jax.scipy.linalg as jsp
 from flax import linen as nn
 
-from .nets import MLP, Array, PRNGKey
+from .nets import MLP, Array, PRNGKey, validate_conditioner
 import nflows.scalar_function as scalar_function
 from .splines import rational_quadratic_spline
 
@@ -308,6 +308,8 @@ class AffineCoupling:
             raise ValueError(
                 f"AffineCoupling mask must be 1D, got shape {self.mask.shape}."
             )
+        # Validate conditioner interface.
+        validate_conditioner(self.conditioner, name="AffineCoupling.conditioner")
 
     @property
     def dim(self) -> int:
@@ -526,15 +528,14 @@ class AffineCoupling:
 
         Arguments:
             key: JAX PRNGKey for parameter initialization.
-            context_dim: Context dimension. If None, inferred from conditioner
-                (if it has a context_dim attribute), otherwise defaults to 0.
+            context_dim: Context dimension. If None, inferred from conditioner.context_dim.
 
         Returns:
             Dict with key 'mlp' containing MLP parameters.
         """
         # Infer context_dim from conditioner if not provided
         if context_dim is None:
-            context_dim = getattr(self.conditioner, "context_dim", 0)
+            context_dim = self.conditioner.context_dim
 
         dummy_x = jnp.zeros((1, self.dim), dtype=jnp.float32)
         dummy_context = jnp.zeros((1, context_dim), dtype=jnp.float32) if context_dim > 0 else None
@@ -619,6 +620,8 @@ class SplineCoupling:
             raise ValueError(
                 f"SplineCoupling: mask must be 1D, got shape {self.mask.shape}."
             )
+        # Validate conditioner interface.
+        validate_conditioner(self.conditioner, name="SplineCoupling.conditioner")
 
     @staticmethod
     def required_out_dim(dim: int, num_bins: int) -> int:
@@ -944,15 +947,14 @@ class SplineCoupling:
 
         Arguments:
             key: JAX PRNGKey for parameter initialization.
-            context_dim: Context dimension. If None, inferred from conditioner
-                (if it has a context_dim attribute), otherwise defaults to 0.
+            context_dim: Context dimension. If None, inferred from conditioner.context_dim.
 
         Returns:
             Dict with key 'mlp' containing MLP parameters.
         """
         # Infer context_dim from conditioner if not provided
         if context_dim is None:
-            context_dim = getattr(self.conditioner, "context_dim", 0)
+            context_dim = self.conditioner.context_dim
 
         dim = int(self.mask.shape[0])
         dummy_x = jnp.zeros((1, dim), dtype=jnp.float32)

@@ -35,6 +35,36 @@ Array = jnp.ndarray
 PRNGKey = jax.Array  # type alias for JAX random keys
 
 
+def validate_conditioner(conditioner, name: str = "conditioner") -> None:
+    """
+    Validate that a conditioner meets the required interface.
+
+    Coupling layers (AffineCoupling, SplineCoupling) require conditioners with:
+      - ``context_dim: int`` attribute (0 for unconditional)
+      - ``apply({"params": params}, x, context) -> output`` method (Flax convention)
+
+    This function raises helpful errors if the conditioner doesn't meet the contract.
+
+    Arguments:
+        conditioner: The conditioner object to validate.
+        name: Name to use in error messages (default: "conditioner").
+
+    Raises:
+        TypeError: If conditioner is missing required attributes or methods.
+    """
+    if not hasattr(conditioner, "context_dim"):
+        raise TypeError(
+            f"{name} must have a 'context_dim' attribute (int, 0 for unconditional). "
+            f"See nets.py docstring for the conditioner interface."
+        )
+
+    if not hasattr(conditioner, "apply"):
+        raise TypeError(
+            f"{name} must have an 'apply' method (Flax convention). "
+            f"See nets.py docstring for the conditioner interface."
+        )
+
+
 class ResNet(nn.Module):
     """
     Residual MLP block: input → hidden → residual blocks → output.
