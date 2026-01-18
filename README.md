@@ -142,7 +142,50 @@ blocks_and_params = [
 bijection, params = assemble_bijection(blocks_and_params)
 ```
 
-See [USAGE.md](USAGE.md) for more examples including context and feature extractors.
+### Custom Architecture with Context and Feature Extractor
+
+```python
+from nflows.builders import make_alternating_mask, create_feature_extractor, assemble_bijection
+from nflows.transforms import AffineCoupling, SplineCoupling, LoftTransform
+
+keys = jax.random.split(key, 5)
+dim = 4
+raw_context_dim = 16      # raw context input dimension
+effective_context_dim = 8  # learned representation dimension
+
+# Create feature extractor: transforms raw context before coupling layers
+fe, fe_params = create_feature_extractor(
+    keys[0], in_dim=raw_context_dim, hidden_dim=32, out_dim=effective_context_dim
+)
+
+# Couplings receive effective_context_dim (output of feature extractor)
+mask0 = make_alternating_mask(dim, parity=0)
+mask1 = make_alternating_mask(dim, parity=1)
+
+blocks_and_params = [
+    AffineCoupling.create(keys[1], dim=dim, mask=mask0, hidden_dim=64, n_hidden_layers=2,
+                          context_dim=effective_context_dim),
+    AffineCoupling.create(keys[2], dim=dim, mask=mask1, hidden_dim=64, n_hidden_layers=2,
+                          context_dim=effective_context_dim),
+    SplineCoupling.create(keys[3], dim=dim, mask=mask0, hidden_dim=64, n_hidden_layers=2,
+                          num_bins=8, context_dim=effective_context_dim),
+    LoftTransform.create(keys[4], dim=dim),
+]
+
+# Assemble with feature extractor
+bijection, params = assemble_bijection(
+    blocks_and_params,
+    feature_extractor=fe,
+    feature_extractor_params=fe_params,
+)
+
+# Usage: pass raw context — feature extractor transforms it internally
+x = jax.random.normal(key, (100, dim))
+raw_context = jax.random.normal(key, (100, raw_context_dim))
+
+y, log_det = bijection.forward(params, x, context=raw_context)
+x_rec, _ = bijection.inverse(params, y, context=raw_context)
+```
 
 ## Architecture
 
