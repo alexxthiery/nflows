@@ -6,7 +6,7 @@ from typing import Any, Callable, Tuple
 import jax
 import jax.numpy as jnp
 
-from .nets import MLP, init_mlp, ResNet, init_resnet, Array, PRNGKey
+from .nets import init_resnet, Array, PRNGKey
 from .distributions import StandardNormal, DiagNormal
 from .transforms import AffineCoupling, Permutation, CompositeTransform, LinearTransform, LoftTransform, SplineCoupling
 from .flows import Flow
@@ -229,59 +229,43 @@ def build_realnvp(
 
     # Optional global linear layer at the beginning of the transform.
     if use_linear:
-        lin_block = LinearTransform(dim=dim)
-        # Identity initialization: L = I, T = I => W = I.
-        lower_raw = jnp.zeros((dim, dim), dtype=jnp.float32)
-        upper_raw = jnp.zeros((dim, dim), dtype=jnp.float32)
-        log_diag = jnp.zeros((dim,), dtype=jnp.float32)
-
+        key, lin_key = jax.random.split(key)
+        lin_block, lin_params = LinearTransform.create(lin_key, dim=dim)
         blocks.append(lin_block)
-        block_params.append(
-            {"lower": lower_raw, "upper": upper_raw, "log_diag": log_diag}
-        )
+        block_params.append(lin_params)
 
     parity = 0  # start with [1, 0, 1, 0, ...]
     for layer_idx in range(num_layers):
         mask = _make_alternating_mask(dim, parity)
         parity = 1 - parity  # flip parity for next layer
 
-        # Initialize conditioner MLP.
-        # Use effective_context_dim (may differ from context_dim if feature extractor is used).
-        mlp, mlp_params = init_mlp(
+        coupling, coupling_params = AffineCoupling.create(
             keys[layer_idx],
-            x_dim=dim,
-            context_dim=effective_context_dim,
+            dim=dim,
+            mask=mask,
             hidden_dim=hidden_dim,
             n_hidden_layers=n_hidden_layers,
-            out_dim=2 * dim,
+            context_dim=effective_context_dim,
             activation=activation,
             res_scale=res_scale,
-        )
-
-        coupling = AffineCoupling(
-            mask=mask,
-            conditioner=mlp,
             max_log_scale=max_log_scale,
         )
-
         blocks.append(coupling)
-        block_params.append({"mlp": mlp_params})
+        block_params.append(coupling_params)
 
         # Optionally insert a permutation between coupling layers,
         # but not after the last one.
         if use_permutation and layer_idx != num_layers - 1:
             perm = jnp.arange(dim - 1, -1, -1)  # simple fixed reverse permutation
-            perm_block = Permutation(perm=perm)
+            perm_block, perm_params = Permutation.create(keys[layer_idx], perm=perm)
             blocks.append(perm_block)
-            block_params.append({})  # no parameters for permutation
-    
+            block_params.append(perm_params)
+
     # add the final LOFT transform
-    loft_block = LoftTransform(
-        dim=dim,
-        tau=loft_tau,
-    )
+    key, loft_key = jax.random.split(key)
+    loft_block, loft_params = LoftTransform.create(loft_key, dim=dim, tau=loft_tau)
     blocks.append(loft_block)
-    block_params.append({})  # no parameters for LOFT
+    block_params.append(loft_params)
 
     transform = CompositeTransform(blocks=blocks)
     
@@ -299,162 +283,6 @@ def build_realnvp(
 
     flow = Flow(base_dist=base, transform=transform, feature_extractor=feature_extractor)
     return flow, params
-
-
-# ====================================================================
-# Spline RealNVP builder
-# ====================================================================
-# def _inv_softplus(y: Array) -> Array:
-#     # Numerically stable inverse of softplus for y > 0.
-#     # softplus(x) = log(1 + exp(x))  =>  x = log(exp(y) - 1)
-#     y = jnp.maximum(y, 1e-6)
-#     return jnp.log(jnp.expm1(y))
-
-
-# def _patch_spline_conditioner_dense_out(
-#     mlp_params: Any,
-#     *,
-#     dim: int,
-#     num_bins: int,
-#     min_derivative: float,
-# ) -> Any:
-#     """
-#     Make the spline conditioner start near identity by patching the final Dense layer:
-#       - kernel -> 0
-#       - bias widths/heights logits -> 0  (uniform bins after softmax)
-#       - bias derivatives -> inv_softplus(1 - min_derivative) so that
-#             min_derivative + softplus(bias) ≈ 1  => initial slopes ≈ 1
-#     Assumes the final layer is named 'dense_out' (as in nflows/nets.py).
-    
-#     This is often important for stabilizing training of spline flows and makes
-#     them behave more like standard affine coupling layers at the start of training.
-#     """
-#     if "dense_out" not in mlp_params:
-#         raise KeyError(
-#             "_patch_spline_conditioner_dense_out: expected mlp_params to contain 'dense_out'. "
-#             "Make sure your MLP final layer is named 'dense_out'."
-#         )
-
-#     dense_out = mlp_params["dense_out"]
-#     if "kernel" not in dense_out or "bias" not in dense_out:
-#         raise KeyError(
-#             "_patch_spline_conditioner_dense_out: expected dense_out to contain 'kernel' and 'bias'."
-#         )
-
-#     K = num_bins
-#     params_per_dim = 3 * K - 1
-
-#     bias = dense_out["bias"]
-#     if bias.shape != (dim * params_per_dim,):
-#         raise ValueError(
-#             "_patch_spline_conditioner_dense_out: unexpected dense_out bias shape. "
-#             f"Expected {(dim * params_per_dim,)}, got {bias.shape}."
-#         )
-
-#     # New kernel: all zeros => NN outputs controlled purely by bias at init.
-#     new_kernel = jnp.zeros_like(dense_out["kernel"])
-
-#     # New bias: widths/heights logits = 0; derivatives chosen to yield slopes ~ 1.
-#     new_bias = jnp.zeros_like(bias).reshape((dim, params_per_dim))
-
-#     # Derivatives live in the last (K-1) entries of each per-dim block.
-#     # We want: min_derivative + softplus(raw_d) ≈ 1.
-#     target = 1.0 - float(min_derivative)
-#     raw_d0 = _inv_softplus(jnp.asarray(target, dtype=new_bias.dtype))
-
-#     new_bias = new_bias.at[:, 2 * K :].set(raw_d0)  # set all derivative logits
-
-#     new_bias = new_bias.reshape((dim * params_per_dim,))
-
-#     # Rebuild mlp_params with patched dense_out.
-#     new_dense_out = dict(dense_out)
-#     new_dense_out["kernel"] = new_kernel
-#     new_dense_out["bias"] = new_bias
-
-#     new_mlp_params = dict(mlp_params)
-#     new_mlp_params["dense_out"] = new_dense_out
-#     return new_mlp_params
-
-def _logit(p: Array) -> Array:
-    p = jnp.clip(p, 1e-6, 1.0 - 1e-6)
-    return jnp.log(p) - jnp.log1p(-p)
-
-
-def _patch_spline_conditioner_dense_out(
-    mlp_params: Any,
-    *,
-    dim: int,
-    num_bins: int,
-    min_derivative: float,
-    max_derivative: float,
-) -> Any:
-    """
-    Make the spline conditioner start near identity by patching the final Dense layer:
-      - kernel -> 0
-      - bias widths/heights logits -> 0  (uniform bins after softmax)
-      - bias derivatives -> chosen so initial internal derivatives are ~1.
-
-    This assumes:
-      - spline parameter layout per dimension is [widths(K), heights(K), derivatives(K-1)]
-      - final MLP layer is named 'dense_out'
-      - derivatives are parameterized either as:
-          (A) min + softplus(u)                    if max_derivative is None
-          (B) min + (max-min)*sigmoid(u)           if max_derivative is not None
-
-    If you change the derivative parameterization in splines.py, update this function.
-    """
-    # MLP params are nested under "net" (the ResNet submodule).
-    if "net" not in mlp_params or "dense_out" not in mlp_params["net"]:
-        raise KeyError(
-            "_patch_spline_conditioner_dense_out: expected mlp_params to contain 'net/dense_out'. "
-            "Make sure your MLP final layer is named 'dense_out'."
-        )
-
-    dense_out = mlp_params["net"]["dense_out"]
-    if "kernel" not in dense_out or "bias" not in dense_out:
-        raise KeyError(
-            "_patch_spline_conditioner_dense_out: expected dense_out to contain 'kernel' and 'bias'."
-        )
-
-    K = num_bins
-    params_per_dim = 3 * K - 1
-
-    bias = dense_out["bias"]
-    if bias.shape != (dim * params_per_dim,):
-        raise ValueError(
-            "_patch_spline_conditioner_dense_out: unexpected dense_out bias shape. "
-            f"Expected {(dim * params_per_dim,)}, got {bias.shape}."
-        )
-
-    new_kernel = jnp.zeros_like(dense_out["kernel"])
-    new_bias = jnp.zeros_like(bias).reshape((dim, params_per_dim))
-
-    # We want: min_derivative + (max-min)*sigmoid(u0) ≈ 1
-    lo = float(min_derivative)
-    hi = float(max_derivative)
-    if not (lo < 1.0 < hi):
-        raise ValueError(
-            "_patch_spline_conditioner_dense_out: to initialize derivatives ~1 with "
-            "sigmoid-bounded parameterization, require min_derivative < 1 < max_derivative. "
-            f"Got min_derivative={lo}, max_derivative={hi}."
-        )
-    alpha = (1.0 - lo) / (hi - lo)  # desired sigmoid output
-    u0 = _logit(jnp.asarray(alpha, dtype=new_bias.dtype))
-
-    new_bias = new_bias.at[:, 2 * K :].set(u0)
-    new_bias = new_bias.reshape((dim * params_per_dim,))
-
-    new_dense_out = dict(dense_out)
-    new_dense_out["kernel"] = new_kernel
-    new_dense_out["bias"] = new_bias
-
-    # Reconstruct nested structure.
-    new_net_params = dict(mlp_params["net"])
-    new_net_params["dense_out"] = new_dense_out
-    new_mlp_params = dict(mlp_params)
-    new_mlp_params["net"] = new_net_params
-    return new_mlp_params
-
 
 def build_spline_realnvp(
     key: PRNGKey,
@@ -631,72 +459,47 @@ def build_spline_realnvp(
 
     # Optional global linear layer at the beginning of the transform.
     if use_linear:
-        lin_block = LinearTransform(dim=dim)
-        lower_raw = jnp.zeros((dim, dim), dtype=jnp.float32)
-        upper_raw = jnp.zeros((dim, dim), dtype=jnp.float32)
-        log_diag = jnp.zeros((dim,), dtype=jnp.float32)
-
+        key, lin_key = jax.random.split(key)
+        lin_block, lin_params = LinearTransform.create(lin_key, dim=dim)
         blocks.append(lin_block)
-        block_params.append(
-            {"lower": lower_raw, "upper": upper_raw, "log_diag": log_diag}
-        )
-
-    params_per_dim = 3 * num_bins - 1
-    out_dim = dim * params_per_dim
+        block_params.append(lin_params)
 
     parity = 0  # start with [1, 0, 1, 0, ...]
     for layer_idx in range(num_layers):
         mask = _make_alternating_mask(dim, parity)
         parity = 1 - parity
 
-        # Initialize conditioner MLP.
-        # Use effective_context_dim (may differ from context_dim if feature extractor is used).
-        mlp, mlp_params = init_mlp(
+        coupling, coupling_params = SplineCoupling.create(
             keys[layer_idx],
-            x_dim=dim,
-            context_dim=effective_context_dim,
+            dim=dim,
+            mask=mask,
             hidden_dim=hidden_dim,
             n_hidden_layers=n_hidden_layers,
-            out_dim=out_dim,
-            activation=activation,
-            res_scale=res_scale,
-        )
-
-        # Patch final layer init so each spline coupling starts near identity.
-        # Important for stabilizing training at the start of optimization.
-        mlp_params = _patch_spline_conditioner_dense_out(
-            mlp_params,
-            dim=dim,
-            num_bins=num_bins,
-            min_derivative=min_derivative,
-            max_derivative=max_derivative,
-        )
-
-        coupling = SplineCoupling(
-            mask=mask,
-            conditioner=mlp,
+            context_dim=effective_context_dim,
             num_bins=num_bins,
             tail_bound=tail_bound,
             min_bin_width=min_bin_width,
             min_bin_height=min_bin_height,
             min_derivative=min_derivative,
             max_derivative=max_derivative,
+            activation=activation,
+            res_scale=res_scale,
         )
-
         blocks.append(coupling)
-        block_params.append({"mlp": mlp_params})
+        block_params.append(coupling_params)
 
         if use_permutation and layer_idx != num_layers - 1:
             perm = jnp.arange(dim - 1, -1, -1)
-            perm_block = Permutation(perm=perm)
+            perm_block, perm_params = Permutation.create(keys[layer_idx], perm=perm)
             blocks.append(perm_block)
-            block_params.append({})
+            block_params.append(perm_params)
 
     # Final LOFT transform (same as build_realnvp)
     # It is used for stabilizing training in high-dimensional settings.
-    loft_block = LoftTransform(dim=dim, tau=loft_tau)
+    key, loft_key = jax.random.split(key)
+    loft_block, loft_params = LoftTransform.create(loft_key, dim=dim, tau=loft_tau)
     blocks.append(loft_block)
-    block_params.append({})
+    block_params.append(loft_params)
 
     transform = CompositeTransform(blocks=blocks)
 

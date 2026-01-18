@@ -1,16 +1,34 @@
 # nflows/transforms.py
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
-from typing import Any, List, Sequence, Tuple
+from typing import Any, Callable, List, Sequence, Tuple
 
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jsp
+from flax import linen as nn
 
-from .nets import MLP, Array
+from .nets import MLP, Array, PRNGKey
 import nflows.scalar_function as scalar_function
 from .splines import rational_quadratic_spline
+
+
+def stable_logit(p: Array) -> Array:
+    """
+    Numerically stable logit function: logit(p) = log(p / (1 - p)).
+
+    Clips input to [1e-6, 1 - 1e-6] to avoid log(0) or log(inf).
+
+    Arguments:
+        p: Probability values in (0, 1).
+
+    Returns:
+        Logit of p.
+    """
+    p = jnp.clip(p, 1e-6, 1.0 - 1e-6)
+    return jnp.log(p) - jnp.log1p(-p)
 
 # ===================================================================
 # Linear Transform with LU-style parameterization
@@ -169,6 +187,52 @@ class LinearTransform:
         log_det_inverse = jnp.broadcast_to(-log_det_scalar, batch_shape)
         return x, log_det_inverse
 
+    def init_params(self, key: PRNGKey) -> dict:
+        """
+        Initialize parameters for this transform.
+
+        Returns identity transform params (L=I, U=0, s=1 => W=I).
+
+        Arguments:
+            key: JAX PRNGKey (unused, included for interface consistency).
+
+        Returns:
+            Dict with keys 'lower', 'upper', 'log_diag'.
+        """
+        del key  # Unused for deterministic identity init.
+        return {
+            "lower": jnp.zeros((self.dim, self.dim), dtype=jnp.float32),
+            "upper": jnp.zeros((self.dim, self.dim), dtype=jnp.float32),
+            "log_diag": jnp.zeros((self.dim,), dtype=jnp.float32),
+        }
+
+    @classmethod
+    def create(cls, key: PRNGKey, dim: int) -> Tuple["LinearTransform", dict]:
+        """
+        Factory method to create LinearTransform and initialize params.
+
+        Arguments:
+            key: JAX PRNGKey for parameter initialization.
+            dim: Dimensionality of the transform.
+
+        Returns:
+            Tuple of (transform, params) ready to use.
+
+        Raises:
+            ValueError: If dim <= 0.
+
+        Example:
+            >>> transform, params = LinearTransform.create(key, dim=4)
+            >>> y, log_det = transform.forward(params, x)
+        """
+        if dim <= 0:
+            raise ValueError(f"LinearTransform.create: dim must be positive, got {dim}.")
+
+        transform = cls(dim=dim)
+        params = transform.init_params(key)
+        return transform, params
+
+
 # ===================================================================
 # Affine Coupling Layer
 # ===================================================================
@@ -248,6 +312,105 @@ class AffineCoupling:
     @property
     def dim(self) -> int:
         return int(self.mask.shape[0])
+
+    @staticmethod
+    def required_out_dim(dim: int) -> int:
+        """
+        Return required conditioner output dimension for AffineCoupling.
+
+        The conditioner must output shift and log_scale for each dimension,
+        so out_dim = 2 * dim.
+
+        Arguments:
+            dim: Input/output dimensionality.
+
+        Returns:
+            Required output dimension for conditioner (2 * dim).
+        """
+        return 2 * dim
+
+    @classmethod
+    def create(
+        cls,
+        key: PRNGKey,
+        dim: int,
+        mask: Array,
+        hidden_dim: int,
+        n_hidden_layers: int,
+        *,
+        context_dim: int = 0,
+        activation: Callable[[Array], Array] = nn.elu,
+        res_scale: float = 0.1,
+        max_log_scale: float = 1.0,
+        max_shift: float | None = None,
+    ) -> Tuple["AffineCoupling", dict]:
+        """
+        Factory method to create AffineCoupling with properly configured MLP.
+
+        This handles the output dimension calculation internally and initializes
+        parameters, returning both the coupling and its params ready to use.
+
+        Arguments:
+            key: JAX PRNGKey for parameter initialization.
+            dim: Input/output dimensionality.
+            mask: Binary mask of shape (dim,). 1 = frozen, 0 = transformed.
+            hidden_dim: Width of hidden layers in conditioner MLP.
+            n_hidden_layers: Number of residual blocks in conditioner MLP.
+            context_dim: Context dimension (0 for unconditional).
+            activation: Activation function for MLP (default: elu).
+            res_scale: Residual connection scale (default: 0.1).
+            max_log_scale: Bound on |log_scale| via tanh (default: 1.0).
+            max_shift: Bound on |shift| via tanh (default: exp(max_log_scale)).
+
+        Returns:
+            Tuple of (coupling, params) ready to use.
+
+        Raises:
+            ValueError: If mask length doesn't match dim, or dim <= 0.
+
+        Example:
+            >>> coupling, params = AffineCoupling.create(
+            ...     key, dim=4, mask=jnp.array([1, 0, 1, 0]),
+            ...     hidden_dim=64, n_hidden_layers=2
+            ... )
+            >>> y, log_det = coupling.forward(params, x)
+        """
+        # Validate inputs
+        if dim <= 0:
+            raise ValueError(f"AffineCoupling.create: dim must be positive, got {dim}.")
+        if hidden_dim <= 0:
+            raise ValueError(f"AffineCoupling.create: hidden_dim must be positive, got {hidden_dim}.")
+
+        mask = jnp.asarray(mask)
+        if mask.shape != (dim,):
+            raise ValueError(
+                f"AffineCoupling.create: mask shape {mask.shape} doesn't match (dim,) = ({dim},)."
+            )
+
+        # Create MLP with correct output dimension
+        out_dim = cls.required_out_dim(dim)
+        mlp = MLP(
+            x_dim=dim,
+            context_dim=context_dim,
+            hidden_dim=hidden_dim,
+            n_hidden_layers=n_hidden_layers,
+            out_dim=out_dim,
+            activation=activation,
+            res_scale=res_scale,
+        )
+
+        # Create coupling
+        coupling = cls(
+            mask=mask,
+            conditioner=mlp,
+            max_log_scale=max_log_scale,
+            max_shift=max_shift,
+        )
+
+        # Initialize params
+        params = coupling.init_params(key)
+
+        return coupling, params
 
     def _condition(self, params: dict, x: Array, context: Array | None = None) -> Tuple[Array, Array]:
         """
@@ -354,6 +517,42 @@ class AffineCoupling:
         log_det = -jnp.sum(log_scale, axis=-1)
         return x, log_det
 
+    def init_params(self, key: PRNGKey, context_dim: int | None = None) -> dict:
+        """
+        Initialize parameters for this transform.
+
+        Uses Flax init to create MLP parameters. With zero-initialized final layer,
+        the transform starts at identity.
+
+        Arguments:
+            key: JAX PRNGKey for parameter initialization.
+            context_dim: Context dimension. If None, inferred from conditioner
+                (if it has a context_dim attribute), otherwise defaults to 0.
+
+        Returns:
+            Dict with key 'mlp' containing MLP parameters.
+        """
+        # Infer context_dim from conditioner if not provided
+        if context_dim is None:
+            context_dim = getattr(self.conditioner, "context_dim", 0)
+
+        dummy_x = jnp.zeros((1, self.dim), dtype=jnp.float32)
+        dummy_context = jnp.zeros((1, context_dim), dtype=jnp.float32) if context_dim > 0 else None
+        variables = self.conditioner.init(key, dummy_x, dummy_context)
+        mlp_params = variables["params"]
+
+        # Zero-init final layer for identity-start. MLP params are nested under "net".
+        if "net" in mlp_params and "dense_out" in mlp_params["net"]:
+            net_params = dict(mlp_params["net"])
+            dense_out = dict(net_params["dense_out"])
+            dense_out["kernel"] = jnp.zeros_like(dense_out["kernel"])
+            dense_out["bias"] = jnp.zeros_like(dense_out["bias"])
+            net_params["dense_out"] = dense_out
+            mlp_params = dict(mlp_params)
+            mlp_params["net"] = net_params
+
+        return {"mlp": mlp_params}
+
 
 # ===================================================================
 # Spline Coupling Layer
@@ -423,6 +622,120 @@ class SplineCoupling:
             raise ValueError(
                 f"SplineCoupling: mask must be 1D, got shape {self.mask.shape}."
             )
+
+    @staticmethod
+    def required_out_dim(dim: int, num_bins: int) -> int:
+        """
+        Return required conditioner output dimension for SplineCoupling.
+
+        The conditioner must output widths (K), heights (K), and derivatives (K-1)
+        for each dimension, so out_dim = dim * (3K - 1).
+
+        Arguments:
+            dim: Input/output dimensionality.
+            num_bins: Number of spline bins (K).
+
+        Returns:
+            Required output dimension for conditioner: dim * (3 * num_bins - 1).
+        """
+        return dim * (3 * num_bins - 1)
+
+    @classmethod
+    def create(
+        cls,
+        key: PRNGKey,
+        dim: int,
+        mask: Array,
+        hidden_dim: int,
+        n_hidden_layers: int,
+        *,
+        context_dim: int = 0,
+        num_bins: int = 8,
+        tail_bound: float = 5.0,
+        min_bin_width: float = 1e-3,
+        min_bin_height: float = 1e-3,
+        min_derivative: float = 1e-3,
+        max_derivative: float = 10.0,
+        activation: Callable[[Array], Array] = nn.elu,
+        res_scale: float = 0.1,
+    ) -> Tuple["SplineCoupling", dict]:
+        """
+        Factory method to create SplineCoupling with properly configured MLP.
+
+        This handles the output dimension calculation internally and initializes
+        parameters, returning both the coupling and its params ready to use.
+
+        Arguments:
+            key: JAX PRNGKey for parameter initialization.
+            dim: Input/output dimensionality.
+            mask: Binary mask of shape (dim,). 1 = frozen, 0 = transformed.
+            hidden_dim: Width of hidden layers in conditioner MLP.
+            n_hidden_layers: Number of residual blocks in conditioner MLP.
+            context_dim: Context dimension (0 for unconditional).
+            num_bins: Number of spline bins (default: 8).
+            tail_bound: Spline acts on [-B, B]; identity outside (default: 5.0).
+            min_bin_width: Minimum bin width for stability (default: 1e-3).
+            min_bin_height: Minimum bin height for stability (default: 1e-3).
+            min_derivative: Minimum derivative for stability (default: 1e-3).
+            max_derivative: Maximum derivative for stability (default: 10.0).
+            activation: Activation function for MLP (default: elu).
+            res_scale: Residual connection scale (default: 0.1).
+
+        Returns:
+            Tuple of (coupling, params) ready to use.
+
+        Raises:
+            ValueError: If mask length doesn't match dim, or invalid parameters.
+
+        Example:
+            >>> coupling, params = SplineCoupling.create(
+            ...     key, dim=4, mask=jnp.array([1, 0, 1, 0]),
+            ...     hidden_dim=64, n_hidden_layers=2, num_bins=8
+            ... )
+            >>> y, log_det = coupling.forward(params, x)
+        """
+        # Validate inputs
+        if dim <= 0:
+            raise ValueError(f"SplineCoupling.create: dim must be positive, got {dim}.")
+        if hidden_dim <= 0:
+            raise ValueError(f"SplineCoupling.create: hidden_dim must be positive, got {hidden_dim}.")
+        if num_bins <= 0:
+            raise ValueError(f"SplineCoupling.create: num_bins must be positive, got {num_bins}.")
+
+        mask = jnp.asarray(mask)
+        if mask.shape != (dim,):
+            raise ValueError(
+                f"SplineCoupling.create: mask shape {mask.shape} doesn't match (dim,) = ({dim},)."
+            )
+
+        # Create MLP with correct output dimension
+        out_dim = cls.required_out_dim(dim, num_bins)
+        mlp = MLP(
+            x_dim=dim,
+            context_dim=context_dim,
+            hidden_dim=hidden_dim,
+            n_hidden_layers=n_hidden_layers,
+            out_dim=out_dim,
+            activation=activation,
+            res_scale=res_scale,
+        )
+
+        # Create coupling
+        coupling = cls(
+            mask=mask,
+            conditioner=mlp,
+            num_bins=num_bins,
+            tail_bound=tail_bound,
+            min_bin_width=min_bin_width,
+            min_bin_height=min_bin_height,
+            min_derivative=min_derivative,
+            max_derivative=max_derivative,
+        )
+
+        # Initialize params
+        params = coupling.init_params(key)
+
+        return coupling, params
 
     def _conditioner_params(self, params: Any) -> Any:
         try:
@@ -568,6 +881,93 @@ class SplineCoupling:
 
         return x, log_det
 
+    def _patch_dense_out(self, mlp_params: Any) -> Any:
+        """
+        Patch MLP final layer for near-identity spline initialization.
+
+        Sets kernel to zero and biases such that:
+          - widths/heights logits → 0 (uniform bins after softmax)
+          - derivatives → ~1 (via inverse sigmoid)
+
+        Arguments:
+            mlp_params: MLP parameter dict.
+
+        Returns:
+            Patched MLP parameters.
+        """
+        # MLP params are nested under "net" (the ResNet submodule).
+        if "net" not in mlp_params or "dense_out" not in mlp_params["net"]:
+            raise KeyError(
+                "SplineCoupling._patch_dense_out: expected mlp_params to contain 'net/dense_out'."
+            )
+
+        dense_out = mlp_params["net"]["dense_out"]
+        if "kernel" not in dense_out or "bias" not in dense_out:
+            raise KeyError(
+                "SplineCoupling._patch_dense_out: expected dense_out to contain 'kernel' and 'bias'."
+            )
+
+        dim = int(self.mask.shape[0])
+        K = self.num_bins
+        params_per_dim = 3 * K - 1
+
+        bias = dense_out["bias"]
+        if bias.shape != (dim * params_per_dim,):
+            raise ValueError(
+                f"SplineCoupling._patch_dense_out: unexpected dense_out bias shape. "
+                f"Expected {(dim * params_per_dim,)}, got {bias.shape}."
+            )
+
+        new_kernel = jnp.zeros_like(dense_out["kernel"])
+        new_bias = jnp.zeros_like(bias).reshape((dim, params_per_dim))
+
+        # For derivatives: min + (max-min)*sigmoid(u0) ≈ 1
+        lo = float(self.min_derivative)
+        hi = float(self.max_derivative)
+        if lo < 1.0 < hi:
+            alpha = (1.0 - lo) / (hi - lo)
+            u0 = stable_logit(jnp.asarray(alpha, dtype=new_bias.dtype))
+            new_bias = new_bias.at[:, 2 * K:].set(u0)
+
+        new_bias = new_bias.reshape((dim * params_per_dim,))
+
+        # Reconstruct nested structure.
+        new_dense_out = dict(dense_out)
+        new_dense_out["kernel"] = new_kernel
+        new_dense_out["bias"] = new_bias
+
+        new_net_params = dict(mlp_params["net"])
+        new_net_params["dense_out"] = new_dense_out
+        new_mlp_params = dict(mlp_params)
+        new_mlp_params["net"] = new_net_params
+        return new_mlp_params
+
+    def init_params(self, key: PRNGKey, context_dim: int | None = None) -> dict:
+        """
+        Initialize parameters for this transform.
+
+        Uses Flax init + patches final layer for near-identity spline init.
+
+        Arguments:
+            key: JAX PRNGKey for parameter initialization.
+            context_dim: Context dimension. If None, inferred from conditioner
+                (if it has a context_dim attribute), otherwise defaults to 0.
+
+        Returns:
+            Dict with key 'mlp' containing MLP parameters.
+        """
+        # Infer context_dim from conditioner if not provided
+        if context_dim is None:
+            context_dim = getattr(self.conditioner, "context_dim", 0)
+
+        dim = int(self.mask.shape[0])
+        dummy_x = jnp.zeros((1, dim), dtype=jnp.float32)
+        dummy_context = jnp.zeros((1, context_dim), dtype=jnp.float32) if context_dim > 0 else None
+        variables = self.conditioner.init(key, dummy_x, dummy_context)
+        mlp_params = variables["params"]
+        mlp_params = self._patch_dense_out(mlp_params)
+        return {"mlp": mlp_params}
+
 
 # ===================================================================
 # Permutation Transform: Fixed permutation of dimensions
@@ -654,6 +1054,43 @@ class Permutation:
         x = y[..., self._inv_perm]
         log_det = jnp.zeros(y.shape[:-1], dtype=y.dtype)
         return x, log_det
+
+    def init_params(self, key: PRNGKey) -> dict:
+        """
+        Initialize parameters for this transform.
+
+        Permutation has no learnable parameters.
+
+        Arguments:
+            key: JAX PRNGKey (unused).
+
+        Returns:
+            Empty dict.
+        """
+        del key  # Unused.
+        return {}
+
+    @classmethod
+    def create(cls, key: PRNGKey, perm: Array) -> Tuple["Permutation", dict]:
+        """
+        Factory method to create Permutation and initialize params.
+
+        Arguments:
+            key: JAX PRNGKey for parameter initialization (unused, for consistency).
+            perm: Permutation indices of shape (dim,).
+
+        Returns:
+            Tuple of (transform, params) ready to use.
+
+        Example:
+            >>> perm = jnp.array([3, 2, 1, 0])  # reverse permutation
+            >>> transform, params = Permutation.create(key, perm=perm)
+            >>> y, log_det = transform.forward(params, x)
+        """
+        del key  # Unused for Permutation.
+        transform = cls(perm=perm)
+        params = transform.init_params(None)  # type: ignore
+        return transform, params
 
 
 # ===================================================================
@@ -754,6 +1191,31 @@ class CompositeTransform:
             log_det_total = log_det_total + log_det.astype(accum_dtype)
 
         return x, log_det_total.astype(y.dtype)
+
+    def init_params(self, key: PRNGKey, context_dim: int = 0) -> list:
+        """
+        Initialize parameters for all blocks in this composite transform.
+
+        Arguments:
+            key: JAX PRNGKey for parameter initialization.
+            context_dim: Context dimension (0 for unconditional).
+
+        Returns:
+            List of parameter dicts, one per block.
+        """
+        keys = jax.random.split(key, len(self.blocks))
+        params = []
+        for k, block in zip(keys, self.blocks):
+            if hasattr(block, "init_params"):
+                sig = inspect.signature(block.init_params)
+                if "context_dim" in sig.parameters:
+                    p = block.init_params(k, context_dim=context_dim)
+                else:
+                    p = block.init_params(k)
+                params.append(p)
+            else:
+                params.append({})
+        return params
 
 
 # ===================================================================
@@ -878,3 +1340,50 @@ class LoftTransform:
         log_det_inverse = -jnp.sum(log_abs_jac_x, axis=-1)
 
         return x, log_det_inverse
+
+    def init_params(self, key: PRNGKey) -> dict:
+        """
+        Initialize parameters for this transform.
+
+        LoftTransform has no learnable parameters.
+
+        Arguments:
+            key: JAX PRNGKey (unused).
+
+        Returns:
+            Empty dict.
+        """
+        del key  # Unused.
+        return {}
+
+    @classmethod
+    def create(
+        cls, key: PRNGKey, dim: int, tau: float = 1000.0
+    ) -> Tuple["LoftTransform", dict]:
+        """
+        Factory method to create LoftTransform and initialize params.
+
+        Arguments:
+            key: JAX PRNGKey for parameter initialization (unused, for consistency).
+            dim: Dimensionality of the transform.
+            tau: Threshold parameter for LOFT transition (default: 1000.0).
+
+        Returns:
+            Tuple of (transform, params) ready to use.
+
+        Raises:
+            ValueError: If dim <= 0 or tau <= 0.
+
+        Example:
+            >>> transform, params = LoftTransform.create(key, dim=4, tau=5.0)
+            >>> y, log_det = transform.forward(params, x)
+        """
+        if dim <= 0:
+            raise ValueError(f"LoftTransform.create: dim must be positive, got {dim}.")
+        if tau <= 0:
+            raise ValueError(f"LoftTransform.create: tau must be positive, got {tau}.")
+
+        del key  # Unused for LoftTransform.
+        transform = cls(dim=dim, tau=tau)
+        params = transform.init_params(None)  # type: ignore
+        return transform, params

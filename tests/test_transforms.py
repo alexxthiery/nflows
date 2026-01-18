@@ -490,3 +490,495 @@ class TestSplineCouplingErrors:
 
         with pytest.raises(KeyError, match="mlp"):
             coupling.forward({}, x)
+
+
+# ============================================================================
+# init_params Tests
+# ============================================================================
+class TestInitParams:
+    """Tests for init_params methods on all transforms."""
+
+    def test_linear_transform_init_params_structure(self, key, dim):
+        """LinearTransform.init_params returns correct structure."""
+        transform = LinearTransform(dim=dim)
+        params = transform.init_params(key)
+
+        assert "lower" in params
+        assert "upper" in params
+        assert "log_diag" in params
+        assert params["lower"].shape == (dim, dim)
+        assert params["upper"].shape == (dim, dim)
+        assert params["log_diag"].shape == (dim,)
+
+    def test_linear_transform_init_params_identity(self, key, dim):
+        """LinearTransform default init produces identity transform."""
+        transform = LinearTransform(dim=dim)
+        params = transform.init_params(key)
+        x = jax.random.normal(key, (10, dim))
+
+        y, ld = transform.forward(params, x)
+
+        assert jnp.allclose(y, x, atol=1e-5)
+        assert jnp.allclose(ld, 0.0, atol=1e-5)
+
+    def test_permutation_init_params_empty(self, key, dim):
+        """Permutation.init_params returns empty dict."""
+        perm = jnp.arange(dim - 1, -1, -1)
+        transform = Permutation(perm=perm)
+        params = transform.init_params(key)
+
+        assert params == {}
+
+    def test_loft_init_params_empty(self, key, dim):
+        """LoftTransform.init_params returns empty dict."""
+        transform = LoftTransform(dim=dim, tau=5.0)
+        params = transform.init_params(key)
+
+        assert params == {}
+
+    def test_affine_coupling_init_params_structure(self, key, dim):
+        """AffineCoupling.init_params returns correct structure."""
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        mlp, _ = init_mlp(
+            key, x_dim=dim, context_dim=0, hidden_dim=16, n_hidden_layers=1, out_dim=2 * dim
+        )
+        coupling = AffineCoupling(mask=mask, conditioner=mlp)
+
+        params = coupling.init_params(key)
+
+        assert "mlp" in params
+        assert "net" in params["mlp"]
+        assert "dense_out" in params["mlp"]["net"]
+
+    def test_affine_coupling_init_params_identity(self, key, dim):
+        """AffineCoupling default init produces near-identity transform."""
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        mlp, _ = init_mlp(
+            key, x_dim=dim, context_dim=0, hidden_dim=16, n_hidden_layers=1, out_dim=2 * dim
+        )
+        coupling = AffineCoupling(mask=mask, conditioner=mlp)
+
+        k1, k2 = jax.random.split(key)
+        params = coupling.init_params(k1)
+        x = jax.random.normal(k2, (10, dim))
+
+        y, ld = coupling.forward(params, x)
+
+        assert jnp.allclose(y, x, atol=1e-5)
+        assert jnp.allclose(ld, 0.0, atol=1e-5)
+
+    def test_affine_coupling_init_params_with_context(self, key, dim, context_dim):
+        """AffineCoupling.init_params works with context_dim > 0."""
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        mlp, _ = init_mlp(
+            key, x_dim=dim, context_dim=context_dim, hidden_dim=16, n_hidden_layers=1, out_dim=2 * dim
+        )
+        coupling = AffineCoupling(mask=mask, conditioner=mlp)
+
+        k1, k2 = jax.random.split(key)
+        params = coupling.init_params(k1, context_dim=context_dim)
+        x = jax.random.normal(k2, (10, dim))
+        ctx = jax.random.normal(k2, (10, context_dim))
+
+        y, ld = coupling.forward(params, x, context=ctx)
+
+        assert y.shape == x.shape
+        assert ld.shape == (10,)
+
+    def test_spline_coupling_init_params_structure(self, key, dim):
+        """SplineCoupling.init_params returns correct structure."""
+        from nflows.nets import MLP
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        num_bins = 8
+        out_dim = dim * (3 * num_bins - 1)
+        mlp = MLP(x_dim=dim, context_dim=0, hidden_dim=16, n_hidden_layers=1, out_dim=out_dim)
+        coupling = SplineCoupling(mask=mask, conditioner=mlp, num_bins=num_bins)
+
+        params = coupling.init_params(key)
+
+        assert "mlp" in params
+        assert "net" in params["mlp"]
+        assert "dense_out" in params["mlp"]["net"]
+
+    def test_spline_coupling_init_params_near_identity(self, key, dim):
+        """SplineCoupling default init produces near-identity transform."""
+        from nflows.nets import MLP
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        num_bins = 8
+        out_dim = dim * (3 * num_bins - 1)
+        mlp = MLP(x_dim=dim, context_dim=0, hidden_dim=16, n_hidden_layers=1, out_dim=out_dim)
+        coupling = SplineCoupling(mask=mask, conditioner=mlp, num_bins=num_bins)
+
+        k1, k2 = jax.random.split(key)
+        params = coupling.init_params(k1)
+        # Use values within spline bounds
+        x = jax.random.uniform(k2, (10, dim), minval=-4.0, maxval=4.0)
+
+        y, ld = coupling.forward(params, x)
+
+        # Should be close to identity (within tolerance for spline approx)
+        assert jnp.allclose(y, x, atol=0.01)
+        assert jnp.allclose(ld, 0.0, atol=0.01)
+
+    def test_spline_coupling_init_params_with_context(self, key, dim, context_dim):
+        """SplineCoupling.init_params works with context_dim > 0."""
+        from nflows.nets import MLP
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        num_bins = 8
+        out_dim = dim * (3 * num_bins - 1)
+        mlp = MLP(x_dim=dim, context_dim=context_dim, hidden_dim=16, n_hidden_layers=1, out_dim=out_dim)
+        coupling = SplineCoupling(mask=mask, conditioner=mlp, num_bins=num_bins)
+
+        k1, k2 = jax.random.split(key)
+        params = coupling.init_params(k1, context_dim=context_dim)
+        x = jax.random.uniform(k2, (10, dim), minval=-4.0, maxval=4.0)
+        ctx = jax.random.normal(k2, (10, context_dim))
+
+        y, ld = coupling.forward(params, x, context=ctx)
+
+        assert y.shape == x.shape
+        assert ld.shape == (10,)
+
+    def test_composite_init_params_structure(self, key, dim):
+        """CompositeTransform.init_params returns list of correct length."""
+        perm = jnp.arange(dim - 1, -1, -1)
+        loft = LoftTransform(dim=dim, tau=5.0)
+        blocks = [Permutation(perm=perm), loft, Permutation(perm=perm)]
+        composite = CompositeTransform(blocks=blocks)
+
+        params = composite.init_params(key)
+
+        assert isinstance(params, list)
+        assert len(params) == 3
+        assert params[0] == {}  # Permutation
+        assert params[1] == {}  # LoftTransform
+        assert params[2] == {}  # Permutation
+
+    def test_composite_init_params_with_coupling(self, key, dim):
+        """CompositeTransform.init_params works with coupling blocks."""
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        mlp, _ = init_mlp(
+            key, x_dim=dim, context_dim=0, hidden_dim=16, n_hidden_layers=1, out_dim=2 * dim
+        )
+        coupling = AffineCoupling(mask=mask, conditioner=mlp)
+        perm = jnp.arange(dim - 1, -1, -1)
+        blocks = [coupling, Permutation(perm=perm)]
+        composite = CompositeTransform(blocks=blocks)
+
+        params = composite.init_params(key)
+
+        assert len(params) == 2
+        assert "mlp" in params[0]  # AffineCoupling params
+        assert params[1] == {}      # Permutation params
+
+    def test_composite_init_params_with_context(self, key, dim, context_dim):
+        """CompositeTransform.init_params passes context_dim to sub-blocks."""
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        mlp, _ = init_mlp(
+            key, x_dim=dim, context_dim=context_dim, hidden_dim=16, n_hidden_layers=1, out_dim=2 * dim
+        )
+        coupling = AffineCoupling(mask=mask, conditioner=mlp)
+        composite = CompositeTransform(blocks=[coupling])
+
+        params = composite.init_params(key, context_dim=context_dim)
+        x = jax.random.normal(key, (10, dim))
+        ctx = jax.random.normal(key, (10, context_dim))
+
+        # Should work with context
+        y, ld = composite.forward(params, x, context=ctx)
+
+        assert y.shape == x.shape
+        assert ld.shape == (10,)
+
+
+# ============================================================================
+# Factory Method Tests (required_out_dim and create)
+# ============================================================================
+class TestAffineCouplingFactory:
+    """Tests for AffineCoupling.required_out_dim and create."""
+
+    def test_required_out_dim(self):
+        """required_out_dim returns 2 * dim."""
+        assert AffineCoupling.required_out_dim(4) == 8
+        assert AffineCoupling.required_out_dim(10) == 20
+        assert AffineCoupling.required_out_dim(1) == 2
+
+    def test_create_returns_coupling_and_params(self, key, dim):
+        """create returns (coupling, params) tuple."""
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        coupling, params = AffineCoupling.create(
+            key, dim=dim, mask=mask, hidden_dim=16, n_hidden_layers=2
+        )
+
+        assert isinstance(coupling, AffineCoupling)
+        assert isinstance(params, dict)
+        assert "mlp" in params
+
+    def test_create_works_without_context_dim_in_init_params(self, key, dim):
+        """create + init_params works without specifying context_dim (inferred)."""
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        coupling, params = AffineCoupling.create(
+            key, dim=dim, mask=mask, hidden_dim=16, n_hidden_layers=2
+        )
+
+        x = jax.random.normal(key, (10, dim))
+        y, ld = coupling.forward(params, x)
+
+        assert y.shape == x.shape
+        assert ld.shape == (10,)
+
+    def test_create_identity_at_init(self, key, dim):
+        """create produces identity transform at init."""
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        coupling, params = AffineCoupling.create(
+            key, dim=dim, mask=mask, hidden_dim=16, n_hidden_layers=2
+        )
+
+        x = jax.random.normal(key, (10, dim))
+        y, ld = coupling.forward(params, x)
+
+        assert jnp.allclose(y, x, atol=1e-5)
+        assert jnp.allclose(ld, 0.0, atol=1e-5)
+
+    def test_create_with_context(self, key, dim, context_dim):
+        """create works with context_dim > 0."""
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        coupling, params = AffineCoupling.create(
+            key, dim=dim, mask=mask, hidden_dim=16, n_hidden_layers=2,
+            context_dim=context_dim,
+        )
+
+        x = jax.random.normal(key, (10, dim))
+        ctx = jax.random.normal(key, (10, context_dim))
+        y, ld = coupling.forward(params, x, context=ctx)
+
+        assert y.shape == x.shape
+        assert ld.shape == (10,)
+
+    def test_create_invalid_dim_raises(self, key):
+        """create raises ValueError for dim <= 0."""
+        mask = jnp.array([1, 0], dtype=jnp.float32)
+        with pytest.raises(ValueError, match="dim must be positive"):
+            AffineCoupling.create(key, dim=0, mask=mask, hidden_dim=16, n_hidden_layers=2)
+
+    def test_create_mask_mismatch_raises(self, key, dim):
+        """create raises ValueError when mask doesn't match dim."""
+        wrong_mask = jnp.array([1, 0, 1], dtype=jnp.float32)
+        with pytest.raises(ValueError, match="mask shape"):
+            AffineCoupling.create(key, dim=dim, mask=wrong_mask, hidden_dim=16, n_hidden_layers=2)
+
+    def test_create_invalid_hidden_dim_raises(self, key, dim):
+        """create raises ValueError for hidden_dim <= 0."""
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        with pytest.raises(ValueError, match="hidden_dim must be positive"):
+            AffineCoupling.create(key, dim=dim, mask=mask, hidden_dim=0, n_hidden_layers=2)
+
+
+class TestSplineCouplingFactory:
+    """Tests for SplineCoupling.required_out_dim and create."""
+
+    def test_required_out_dim(self):
+        """required_out_dim returns dim * (3K - 1)."""
+        assert SplineCoupling.required_out_dim(4, num_bins=8) == 4 * (3 * 8 - 1)  # 92
+        assert SplineCoupling.required_out_dim(2, num_bins=4) == 2 * (3 * 4 - 1)  # 22
+        assert SplineCoupling.required_out_dim(1, num_bins=2) == 1 * (3 * 2 - 1)  # 5
+
+    def test_create_returns_coupling_and_params(self, key, dim):
+        """create returns (coupling, params) tuple."""
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        coupling, params = SplineCoupling.create(
+            key, dim=dim, mask=mask, hidden_dim=16, n_hidden_layers=2, num_bins=8
+        )
+
+        assert isinstance(coupling, SplineCoupling)
+        assert isinstance(params, dict)
+        assert "mlp" in params
+
+    def test_create_works_without_context_dim_in_init_params(self, key, dim):
+        """create + init_params works without specifying context_dim (inferred)."""
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        coupling, params = SplineCoupling.create(
+            key, dim=dim, mask=mask, hidden_dim=16, n_hidden_layers=2, num_bins=8
+        )
+
+        x = jax.random.uniform(key, (10, dim), minval=-4.0, maxval=4.0)
+        y, ld = coupling.forward(params, x)
+
+        assert y.shape == x.shape
+        assert ld.shape == (10,)
+
+    def test_create_near_identity_at_init(self, key, dim):
+        """create produces near-identity transform at init."""
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        coupling, params = SplineCoupling.create(
+            key, dim=dim, mask=mask, hidden_dim=16, n_hidden_layers=2, num_bins=8
+        )
+
+        x = jax.random.uniform(key, (10, dim), minval=-4.0, maxval=4.0)
+        y, ld = coupling.forward(params, x)
+
+        assert jnp.allclose(y, x, atol=0.01)
+        assert jnp.allclose(ld, 0.0, atol=0.01)
+
+    def test_create_with_context(self, key, dim, context_dim):
+        """create works with context_dim > 0."""
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        coupling, params = SplineCoupling.create(
+            key, dim=dim, mask=mask, hidden_dim=16, n_hidden_layers=2,
+            num_bins=8, context_dim=context_dim,
+        )
+
+        x = jax.random.uniform(key, (10, dim), minval=-4.0, maxval=4.0)
+        ctx = jax.random.normal(key, (10, context_dim))
+        y, ld = coupling.forward(params, x, context=ctx)
+
+        assert y.shape == x.shape
+        assert ld.shape == (10,)
+
+    def test_create_invalid_dim_raises(self, key):
+        """create raises ValueError for dim <= 0."""
+        mask = jnp.array([1, 0], dtype=jnp.float32)
+        with pytest.raises(ValueError, match="dim must be positive"):
+            SplineCoupling.create(key, dim=0, mask=mask, hidden_dim=16, n_hidden_layers=2)
+
+    def test_create_mask_mismatch_raises(self, key, dim):
+        """create raises ValueError when mask doesn't match dim."""
+        wrong_mask = jnp.array([1, 0, 1], dtype=jnp.float32)
+        with pytest.raises(ValueError, match="mask shape"):
+            SplineCoupling.create(key, dim=dim, mask=wrong_mask, hidden_dim=16, n_hidden_layers=2)
+
+    def test_create_invalid_num_bins_raises(self, key, dim):
+        """create raises ValueError for num_bins <= 0."""
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        with pytest.raises(ValueError, match="num_bins must be positive"):
+            SplineCoupling.create(key, dim=dim, mask=mask, hidden_dim=16, n_hidden_layers=2, num_bins=0)
+
+
+class TestCustomConditionerWithRequiredOutDim:
+    """Tests that raw constructor + required_out_dim works for custom architectures."""
+
+    def test_affine_coupling_custom_conditioner(self, key, dim):
+        """Raw constructor works with custom MLP using required_out_dim."""
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        out_dim = AffineCoupling.required_out_dim(dim)
+
+        # Custom MLP with different config
+        from nflows.nets import MLP
+        custom_mlp = MLP(
+            x_dim=dim, context_dim=0, hidden_dim=128, n_hidden_layers=5, out_dim=out_dim
+        )
+
+        coupling = AffineCoupling(mask=mask, conditioner=custom_mlp)
+        params = coupling.init_params(key)  # Should infer context_dim=0
+
+        x = jax.random.normal(key, (10, dim))
+        y, ld = coupling.forward(params, x)
+
+        assert y.shape == x.shape
+
+    def test_spline_coupling_custom_conditioner(self, key, dim):
+        """Raw constructor works with custom MLP using required_out_dim."""
+        mask = jnp.array([1, 0] * (dim // 2), dtype=jnp.float32)
+        num_bins = 8
+        out_dim = SplineCoupling.required_out_dim(dim, num_bins)
+
+        # Custom MLP with different config
+        from nflows.nets import MLP
+        custom_mlp = MLP(
+            x_dim=dim, context_dim=0, hidden_dim=128, n_hidden_layers=5, out_dim=out_dim
+        )
+
+        coupling = SplineCoupling(mask=mask, conditioner=custom_mlp, num_bins=num_bins)
+        params = coupling.init_params(key)  # Should infer context_dim=0
+
+        x = jax.random.uniform(key, (10, dim), minval=-4.0, maxval=4.0)
+        y, ld = coupling.forward(params, x)
+
+        assert y.shape == x.shape
+
+
+# ============================================================================
+# Factory Tests for Simple Transforms (LinearTransform, Permutation, LoftTransform)
+# ============================================================================
+class TestLinearTransformFactory:
+    """Tests for LinearTransform.create."""
+
+    def test_create_returns_transform_and_params(self, key, dim):
+        """create returns (transform, params) tuple."""
+        transform, params = LinearTransform.create(key, dim=dim)
+
+        assert isinstance(transform, LinearTransform)
+        assert isinstance(params, dict)
+        assert "lower" in params
+        assert "upper" in params
+        assert "log_diag" in params
+
+    def test_create_identity_at_init(self, key, dim):
+        """create produces identity transform at init."""
+        transform, params = LinearTransform.create(key, dim=dim)
+
+        x = jax.random.normal(key, (10, dim))
+        y, ld = transform.forward(params, x)
+
+        assert jnp.allclose(y, x, atol=1e-5)
+        assert jnp.allclose(ld, 0.0, atol=1e-5)
+
+    def test_create_invalid_dim_raises(self, key):
+        """create raises ValueError for dim <= 0."""
+        with pytest.raises(ValueError, match="dim must be positive"):
+            LinearTransform.create(key, dim=0)
+
+
+class TestPermutationFactory:
+    """Tests for Permutation.create."""
+
+    def test_create_returns_transform_and_params(self, key, dim):
+        """create returns (transform, params) tuple."""
+        perm = jnp.arange(dim - 1, -1, -1)
+        transform, params = Permutation.create(key, perm=perm)
+
+        assert isinstance(transform, Permutation)
+        assert params == {}
+
+    def test_create_works(self, key, dim):
+        """create produces working transform."""
+        perm = jnp.arange(dim - 1, -1, -1)  # reverse
+        transform, params = Permutation.create(key, perm=perm)
+
+        x = jax.random.normal(key, (10, dim))
+        y, ld = transform.forward(params, x)
+
+        # Reverse permutation should reverse the last dimension
+        assert jnp.allclose(y, x[..., ::-1])
+        assert jnp.allclose(ld, 0.0)
+
+
+class TestLoftTransformFactory:
+    """Tests for LoftTransform.create."""
+
+    def test_create_returns_transform_and_params(self, key, dim):
+        """create returns (transform, params) tuple."""
+        transform, params = LoftTransform.create(key, dim=dim, tau=5.0)
+
+        assert isinstance(transform, LoftTransform)
+        assert params == {}
+
+    def test_create_near_identity_near_zero(self, key, dim):
+        """create produces near-identity transform for small inputs."""
+        transform, params = LoftTransform.create(key, dim=dim, tau=5.0)
+
+        # Small inputs should be nearly unchanged
+        x = jax.random.normal(key, (10, dim)) * 0.1
+        y, ld = transform.forward(params, x)
+
+        assert jnp.allclose(y, x, atol=1e-4)
+
+    def test_create_invalid_dim_raises(self, key):
+        """create raises ValueError for dim <= 0."""
+        with pytest.raises(ValueError, match="dim must be positive"):
+            LoftTransform.create(key, dim=0)
+
+    def test_create_invalid_tau_raises(self, key, dim):
+        """create raises ValueError for tau <= 0."""
+        with pytest.raises(ValueError, match="tau must be positive"):
+            LoftTransform.create(key, dim=dim, tau=0.0)
