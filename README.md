@@ -48,31 +48,6 @@ log_prob = flow.log_prob(params, samples)  # (1000,)
 samples, log_prob = flow.sample_and_log_prob(params, key, shape=(1000,))
 ```
 
-### Conditional Flow
-
-Model conditional densities `q(x | context)`:
-
-```python
-from nflows.builders import build_realnvp
-
-# Build conditional flow
-flow, params = build_realnvp(
-    key,
-    dim=4,
-    num_layers=4,
-    hidden_dim=64,
-    n_hidden_layers=2,
-    context_dim=2,  # Conditioning variable dimension
-)
-
-# Context can be per-sample or shared
-context = jax.random.normal(key, (1000, 2))  # Per-sample context
-
-# All methods accept context
-samples = flow.sample(params, key, (1000,), context=context)
-log_prob = flow.log_prob(params, samples, context=context)
-```
-
 ### Spline Flows
 
 More expressive than affine coupling:
@@ -105,16 +80,13 @@ bijection, params = build_realnvp(
     num_layers=4,
     hidden_dim=64,
     n_hidden_layers=2,
-    context_dim=2,              # Works with context
     return_transform_only=True,  # Return Bijection instead of Flow
 )
 
 # Forward/inverse with tractable Jacobian
 x = jax.random.normal(key, (100, 4))
-context = jax.random.normal(key, (100, 2))
-
-y, log_det = bijection.forward(params, x, context=context)
-x_rec, _   = bijection.inverse(params, y, context=context)
+y, log_det = bijection.forward(params, x)
+x_rec, _   = bijection.inverse(params, y)
 ```
 
 Use cases: change of variables, learned coordinate transforms, custom base distributions.
@@ -140,51 +112,6 @@ blocks_and_params = [
 ]
 
 bijection, params = assemble_bijection(blocks_and_params)
-```
-
-### Custom Architecture with Context and Feature Extractor
-
-```python
-from nflows.builders import make_alternating_mask, create_feature_extractor, assemble_bijection
-from nflows.transforms import AffineCoupling, SplineCoupling, LoftTransform
-
-keys = jax.random.split(key, 5)
-dim = 4
-raw_context_dim = 16      # raw context input dimension
-effective_context_dim = 8  # learned representation dimension
-
-# Create feature extractor: transforms raw context before coupling layers
-fe, fe_params = create_feature_extractor(
-    keys[0], in_dim=raw_context_dim, hidden_dim=32, out_dim=effective_context_dim
-)
-
-# Couplings receive effective_context_dim (output of feature extractor)
-mask0 = make_alternating_mask(dim, parity=0)
-mask1 = make_alternating_mask(dim, parity=1)
-
-blocks_and_params = [
-    AffineCoupling.create(keys[1], dim=dim, mask=mask0, hidden_dim=64, n_hidden_layers=2,
-                          context_dim=effective_context_dim),
-    AffineCoupling.create(keys[2], dim=dim, mask=mask1, hidden_dim=64, n_hidden_layers=2,
-                          context_dim=effective_context_dim),
-    SplineCoupling.create(keys[3], dim=dim, mask=mask0, hidden_dim=64, n_hidden_layers=2,
-                          num_bins=8, context_dim=effective_context_dim),
-    LoftTransform.create(keys[4], dim=dim),
-]
-
-# Assemble with feature extractor
-bijection, params = assemble_bijection(
-    blocks_and_params,
-    feature_extractor=fe,
-    feature_extractor_params=fe_params,
-)
-
-# Usage: pass raw context — feature extractor transforms it internally
-x = jax.random.normal(key, (100, dim))
-raw_context = jax.random.normal(key, (100, raw_context_dim))
-
-y, log_det = bijection.forward(params, x, context=raw_context)
-x_rec, _ = bijection.inverse(params, y, context=raw_context)
 ```
 
 ### Identity Gating
@@ -247,14 +174,29 @@ z, log_det = transform.inverse(params, x, context=None)
 
 ## Conditioning
 
-For conditional flows, set `context_dim > 0`. The context is concatenated to the masked input before each conditioner MLP:
+Conditional flows model `q(x | context)`. Set `context_dim > 0` to enable conditioning.
+
+### Basic Usage
 
 ```python
-flow, params = build_realnvp(..., context_dim=2)
+from nflows.builders import build_realnvp
 
-# Context can be per-sample or shared
-samples = flow.sample(params, key, (1000,), context=context)  # (1000, 2) or (2,)
+flow, params = build_realnvp(
+    key,
+    dim=4,
+    num_layers=4,
+    hidden_dim=64,
+    n_hidden_layers=2,
+    context_dim=2,  # Enable conditioning
+)
+
+# All methods accept context (per-sample or shared)
+context = jax.random.normal(key, (1000, 2))  # (batch, context_dim)
+samples = flow.sample(params, key, (1000,), context=context)
+log_prob = flow.log_prob(params, samples, context=context)
 ```
+
+Internally, the context is concatenated to the masked input before each conditioner MLP.
 
 ### Feature Extractor
 
@@ -262,7 +204,11 @@ For high-dimensional or heterogeneous context, a learned feature extractor can t
 
 ```python
 flow, params = build_realnvp(
-    ...,
+    key,
+    dim=4,
+    num_layers=4,
+    hidden_dim=64,
+    n_hidden_layers=2,
     context_dim=16,                     # Raw context dimension
     context_extractor_hidden_dim=64,    # Enable feature extractor (0 = disabled)
     context_extractor_n_layers=2,       # Depth of extractor network
@@ -270,12 +216,38 @@ flow, params = build_realnvp(
 )
 ```
 
-When enabled:
-1. Raw context passes through a shared ResNet once per forward/inverse call
-2. The extracted features (dimension `context_feature_dim`) are used by all coupling layers
-3. Gradients flow through the extractor for end-to-end training
+When enabled, raw context passes through a shared ResNet, and the extracted features are used by all coupling layers. Parameters are stored in `params["feature_extractor"]`.
 
-The feature extractor parameters are stored in `params["feature_extractor"]`.
+### Assembly API with Context
+
+When using the assembly API for custom architectures, pass `context_dim` to each coupling:
+
+```python
+from nflows.builders import make_alternating_mask, create_feature_extractor, assemble_bijection
+from nflows.transforms import AffineCoupling, LoftTransform
+
+keys = jax.random.split(key, 4)
+dim, context_dim = 4, 8
+
+mask0 = make_alternating_mask(dim, parity=0)
+mask1 = make_alternating_mask(dim, parity=1)
+
+blocks_and_params = [
+    AffineCoupling.create(keys[0], dim=dim, mask=mask0, hidden_dim=64,
+                          n_hidden_layers=2, context_dim=context_dim),
+    AffineCoupling.create(keys[1], dim=dim, mask=mask1, hidden_dim=64,
+                          n_hidden_layers=2, context_dim=context_dim),
+    LoftTransform.create(keys[2], dim=dim),
+]
+
+bijection, params = assemble_bijection(blocks_and_params)
+
+# Usage
+context = jax.random.normal(key, (100, context_dim))
+y, log_det = bijection.forward(params, x, context=context)
+```
+
+For a feature extractor with the assembly API, use `create_feature_extractor()` and pass it to `assemble_bijection()`.
 
 ## Training
 
