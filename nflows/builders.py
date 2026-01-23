@@ -533,6 +533,7 @@ def build_realnvp(
     activation: Callable[[Array], Array] = jax.nn.tanh,
     loft_tau: float = 1000.0,
     return_transform_only: bool = False,
+    identity_gate: Callable[[Array], Array] | None = None,
 ) -> Tuple[Flow | Bijection, Any]:
     """
     Construct a RealNVP-style flow with affine coupling layers.
@@ -590,6 +591,11 @@ def build_realnvp(
       return_transform_only: If True, return a Bijection (transform + optional feature
                    extractor) instead of a full Flow. Useful when you only need the
                    invertible map with tractable Jacobian, without a base distribution.
+      identity_gate: Optional callable that maps context -> scalar gate value.
+                   When gate=0, transform is identity (y=x, log_det=0). When gate=1,
+                   transform acts normally. Incompatible with use_permutation=True
+                   because permutations cannot be smoothly interpolated to identity.
+                   Example: identity_gate = lambda ctx: jnp.sin(jnp.pi * ctx[0])
 
     Returns:
       If return_transform_only=False (default):
@@ -608,6 +614,16 @@ def build_realnvp(
     if context_dim < 0:
         raise ValueError(
             f"build_realnvp: context_dim must be non-negative, got {context_dim}."
+        )
+    if identity_gate is not None and use_permutation:
+        raise ValueError(
+            "build_realnvp: identity_gate is incompatible with use_permutation=True. "
+            "Permutation cannot be smoothly interpolated to identity."
+        )
+    if identity_gate is not None and context_dim == 0:
+        raise ValueError(
+            "build_realnvp: identity_gate requires context_dim > 0 "
+            "(gate function operates on context)."
         )
 
     # Context feature extractor (optional)
@@ -686,7 +702,11 @@ def build_realnvp(
         params = {"transform": block_params}
         if feature_extractor is not None:
             params["feature_extractor"] = fe_params
-        bijection = Bijection(transform=transform, feature_extractor=feature_extractor)
+        bijection = Bijection(
+            transform=transform,
+            feature_extractor=feature_extractor,
+            identity_gate=identity_gate,
+        )
         return bijection, params
 
     params = {
@@ -696,7 +716,12 @@ def build_realnvp(
     if feature_extractor is not None:
         params["feature_extractor"] = fe_params
 
-    flow = Flow(base_dist=base, transform=transform, feature_extractor=feature_extractor)
+    flow = Flow(
+        base_dist=base,
+        transform=transform,
+        feature_extractor=feature_extractor,
+        identity_gate=identity_gate,
+    )
     return flow, params
 
 
@@ -727,6 +752,7 @@ def build_spline_realnvp(
     activation: Callable[[Array], Array] = jax.nn.tanh,
     loft_tau: float = 1000.0,
     return_transform_only: bool = False,
+    identity_gate: Callable[[Array], Array] | None = None,
 ) -> Tuple[Flow | Bijection, Any]:
     """
     Construct a RealNVP-style flow with monotonic rational-quadratic spline coupling layers
@@ -796,6 +822,11 @@ def build_spline_realnvp(
       return_transform_only: If True, return a Bijection (transform + optional feature
                    extractor) instead of a full Flow. Useful when you only need the
                    invertible map with tractable Jacobian, without a base distribution.
+      identity_gate: Optional callable that maps context -> scalar gate value.
+                   When gate=0, transform is identity (y=x, log_det=0). When gate=1,
+                   transform acts normally. Incompatible with use_permutation=True
+                   because permutations cannot be smoothly interpolated to identity.
+                   Example: identity_gate = lambda ctx: jnp.sin(jnp.pi * ctx[0])
 
     Returns:
       If return_transform_only=False (default):
@@ -814,6 +845,16 @@ def build_spline_realnvp(
     if context_dim < 0:
         raise ValueError(
             f"build_spline_realnvp: context_dim must be non-negative, got {context_dim}."
+        )
+    if identity_gate is not None and use_permutation:
+        raise ValueError(
+            "build_spline_realnvp: identity_gate is incompatible with use_permutation=True. "
+            "Permutation cannot be smoothly interpolated to identity."
+        )
+    if identity_gate is not None and context_dim == 0:
+        raise ValueError(
+            "build_spline_realnvp: identity_gate requires context_dim > 0 "
+            "(gate function operates on context)."
         )
     if num_bins <= 0:
         raise ValueError(
@@ -910,7 +951,11 @@ def build_spline_realnvp(
         params = {"transform": block_params}
         if feature_extractor is not None:
             params["feature_extractor"] = fe_params
-        bijection = Bijection(transform=transform, feature_extractor=feature_extractor)
+        bijection = Bijection(
+            transform=transform,
+            feature_extractor=feature_extractor,
+            identity_gate=identity_gate,
+        )
         return bijection, params
 
     params = {
@@ -920,5 +965,10 @@ def build_spline_realnvp(
     if feature_extractor is not None:
         params["feature_extractor"] = fe_params
 
-    flow = Flow(base_dist=base, transform=transform, feature_extractor=feature_extractor)
+    flow = Flow(
+        base_dist=base,
+        transform=transform,
+        feature_extractor=feature_extractor,
+        identity_gate=identity_gate,
+    )
     return flow, params

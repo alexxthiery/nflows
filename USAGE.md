@@ -145,6 +145,47 @@ my_flow = Flow(base_dist=my_custom_dist, transform=bijection.transform,
                feature_extractor=bijection.feature_extractor)
 ```
 
+## Identity gate (smooth identity interpolation)
+
+The `identity_gate` parameter enables smooth interpolation between the identity transform
+and the learned transform based on context. This is useful for time-dependent flows or
+boundary conditions where the transform must be identity at certain contexts.
+
+```python
+import jax.numpy as jnp
+from nflows.builders import build_realnvp
+
+# Gate = sin(π * t): identity at t=0 and t=1, full transform at t=0.5
+gate_fn = lambda ctx: jnp.sin(jnp.pi * ctx[0])
+
+flow, params = build_realnvp(
+    key=key,
+    dim=4,
+    num_layers=4,
+    hidden_dim=64,
+    n_hidden_layers=2,
+    context_dim=1,
+    identity_gate=gate_fn,
+)
+
+# At t=0: transform is identity
+x = jax.random.normal(key, (100, 4))
+ctx_0 = jnp.zeros((100, 1))
+y_0, log_det_0 = flow.forward(params, x, context=ctx_0)
+# y_0 ≈ x, log_det_0 ≈ 0
+
+# At t=0.5: full transform
+ctx_half = jnp.ones((100, 1)) * 0.5
+y_half, log_det_half = flow.forward(params, x, context=ctx_half)
+
+# Invertibility works at all gate values
+x_rec, _ = flow.inverse(params, y_half, context=ctx_half)
+# x_rec ≈ x
+```
+
+**Note:** `identity_gate` requires `context_dim > 0` and is incompatible with
+`use_permutation=True` (permutations cannot be smoothly gated).
+
 ## Custom flow architectures
 
 For non-standard architectures (e.g., mixing affine and spline couplings), use the

@@ -115,3 +115,53 @@ embedding improves conditioning (e.g., high-dimensional contexts, heterogeneous 
 | `context_extractor_n_layers` | 2 | Residual blocks in context extractor |
 | `context_feature_dim` | None | Output dim of extractor (default: same as `context_dim`) |
 | `return_transform_only` | False | Return `Bijection` instead of `Flow` (no base distribution) |
+| `identity_gate` | None | Callable `context -> scalar` for smooth identity interpolation |
+
+## Identity Gate
+
+The `identity_gate` feature enables smooth interpolation between the identity transform and
+the learned transform based on context. This is useful for:
+- **Time-dependent flows** where the transform should be identity at t=0 and t=1
+- **Boundary conditions** requiring the transform to match identity at specific contexts
+- **Curriculum learning** where transform complexity grows gradually
+
+### How It Works
+
+When `identity_gate` is provided, each transform layer scales its parameters by the gate
+value before computing the transformation:
+- When `gate = 0`: parameters are zeroed → transform is identity, `log_det = 0`
+- When `gate = 1`: parameters are unchanged → transform acts normally
+- When `0 < gate < 1`: smooth interpolation between identity and learned transform
+
+### Example: Smooth ODE-like Flow
+
+```python
+import jax.numpy as jnp
+from nflows.builders import build_realnvp
+
+# Gate = sin(π * t): identity at t=0 and t=1, full transform at t=0.5
+gate_fn = lambda ctx: jnp.sin(jnp.pi * ctx[0])
+
+flow, params = build_realnvp(
+    key, dim=4, num_layers=4, hidden_dim=64, n_hidden_layers=2,
+    context_dim=1,
+    identity_gate=gate_fn,
+)
+
+# At t=0: F(x, t=0) = x
+y_0, log_det_0 = flow.forward(params, x, context=jnp.array([[0.0]]))
+# y_0 ≈ x, log_det_0 ≈ 0
+
+# At t=1: F(x, t=1) = x
+y_1, log_det_1 = flow.forward(params, x, context=jnp.array([[1.0]]))
+# y_1 ≈ x, log_det_1 ≈ 0
+
+# At t=0.5: full transform
+y_half, log_det_half = flow.forward(params, x, context=jnp.array([[0.5]]))
+```
+
+### Constraints
+
+- `identity_gate` requires `context_dim > 0` (gate function operates on context)
+- `identity_gate` is incompatible with `use_permutation=True` (permutations cannot be
+  smoothly interpolated to identity)

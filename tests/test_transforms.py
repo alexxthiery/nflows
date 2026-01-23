@@ -25,11 +25,14 @@ class TestLinearTransform:
 
     @pytest.fixture
     def identity_params(self, dim):
-        """Identity transform params (L=I, U=0, s=1)."""
+        """Identity transform params (L=I, U=0, s=1).
+
+        For softplus parametrization, raw_diag = log(e-1) gives s = softplus(raw_diag) = 1.
+        """
         return {
             "lower": jnp.zeros((dim, dim)),
             "upper": jnp.zeros((dim, dim)),
-            "log_diag": jnp.zeros(dim),
+            "raw_diag": jnp.full((dim,), jnp.log(jnp.e - 1)),
         }
 
     @pytest.fixture
@@ -39,7 +42,7 @@ class TestLinearTransform:
         return {
             "lower": jax.random.normal(k1, (dim, dim)) * 0.1,
             "upper": jax.random.normal(k2, (dim, dim)) * 0.1,
-            "log_diag": jax.random.normal(k3, (dim,)) * 0.5,
+            "raw_diag": jax.random.normal(k3, (dim,)) * 0.5,
         }
 
     def test_identity_at_init(self, dim, identity_params):
@@ -137,7 +140,7 @@ class TestLinearTransform:
         bad_params = {
             "lower": jnp.zeros((dim + 1, dim)),
             "upper": jnp.zeros((dim, dim)),
-            "log_diag": jnp.zeros(dim),
+            "raw_diag": jnp.full((dim,), jnp.log(jnp.e - 1)),
         }
         x = jnp.zeros((1, dim))
 
@@ -150,24 +153,24 @@ class TestLinearTransform:
         bad_params = {
             "lower": jnp.zeros((dim, dim)),
             "upper": jnp.zeros((dim, dim + 1)),
-            "log_diag": jnp.zeros(dim),
+            "raw_diag": jnp.full((dim,), jnp.log(jnp.e - 1)),
         }
         x = jnp.zeros((1, dim))
 
         with pytest.raises(ValueError, match="upper must have shape"):
             transform.forward(bad_params, x)
 
-    def test_wrong_log_diag_shape_raises(self, dim):
-        """Wrong log_diag shape raises ValueError."""
+    def test_wrong_raw_diag_shape_raises(self, dim):
+        """Wrong raw_diag shape raises ValueError."""
         transform = LinearTransform(dim=dim)
         bad_params = {
             "lower": jnp.zeros((dim, dim)),
             "upper": jnp.zeros((dim, dim)),
-            "log_diag": jnp.zeros(dim + 1),
+            "raw_diag": jnp.zeros(dim + 1),
         }
         x = jnp.zeros((1, dim))
 
-        with pytest.raises(ValueError, match="log_diag must have shape"):
+        with pytest.raises(ValueError, match="raw_diag must have shape"):
             transform.forward(bad_params, x)
 
     def test_missing_params_raises(self, dim):
@@ -505,10 +508,10 @@ class TestInitParams:
 
         assert "lower" in params
         assert "upper" in params
-        assert "log_diag" in params
+        assert "raw_diag" in params
         assert params["lower"].shape == (dim, dim)
         assert params["upper"].shape == (dim, dim)
-        assert params["log_diag"].shape == (dim,)
+        assert params["raw_diag"].shape == (dim,)
 
     def test_linear_transform_init_params_identity(self, key, dim):
         """LinearTransform default init produces identity transform."""
@@ -963,7 +966,7 @@ class TestLinearTransformFactory:
         assert isinstance(params, dict)
         assert "lower" in params
         assert "upper" in params
-        assert "log_diag" in params
+        assert "raw_diag" in params
 
     def test_create_identity_at_init(self, key, dim):
         """create produces identity transform at init."""
@@ -979,6 +982,82 @@ class TestLinearTransformFactory:
         """create raises ValueError for dim <= 0."""
         with pytest.raises(ValueError, match="dim must be positive"):
             LinearTransform.create(key, dim=0)
+
+    def test_create_with_context(self, key, dim):
+        """create with context_dim > 0 produces conditioner."""
+        context_dim = 8
+        transform, params = LinearTransform.create(
+            key, dim=dim, context_dim=context_dim, hidden_dim=32, n_hidden_layers=2
+        )
+
+        assert transform.conditioner is not None
+        assert transform.context_dim == context_dim
+        assert "mlp" in params
+
+    def test_create_with_context_identity_at_init(self, key, dim):
+        """Conditional LinearTransform is identity at initialization."""
+        context_dim = 8
+        transform, params = LinearTransform.create(
+            key, dim=dim, context_dim=context_dim, hidden_dim=32, n_hidden_layers=2
+        )
+
+        x = jax.random.normal(key, (10, dim))
+        context = jax.random.normal(key, (10, context_dim))
+        y, ld = transform.forward(params, x, context)
+
+        assert jnp.allclose(y, x, atol=1e-5)
+        assert jnp.allclose(ld, 0.0, atol=1e-5)
+
+    def test_create_with_context_invertibility(self, key, dim):
+        """Conditional LinearTransform is invertible."""
+        context_dim = 8
+        transform, params = LinearTransform.create(
+            key, dim=dim, context_dim=context_dim, hidden_dim=32, n_hidden_layers=2
+        )
+
+        # Perturb params away from identity
+        k1, k2 = jax.random.split(key)
+        params["lower"] = jax.random.normal(k1, (dim, dim)) * 0.1
+        params["upper"] = jax.random.normal(k2, (dim, dim)) * 0.1
+
+        x = jax.random.normal(key, (10, dim))
+        context = jax.random.normal(key, (10, context_dim))
+
+        y, ld_fwd = transform.forward(params, x, context)
+        x_rec, ld_inv = transform.inverse(params, y, context)
+
+        assert jnp.allclose(x, x_rec, atol=1e-5)
+        assert jnp.allclose(ld_fwd + ld_inv, 0.0, atol=1e-5)
+
+    def test_create_with_context_different_contexts_give_different_outputs(self, key, dim):
+        """Different contexts produce different transformations."""
+        context_dim = 8
+        transform, params = LinearTransform.create(
+            key, dim=dim, context_dim=context_dim, hidden_dim=32, n_hidden_layers=2
+        )
+
+        # Perturb MLP output layer to get non-zero conditioner output
+        # (at init, output layer is zero so all contexts give same result)
+        k1 = jax.random.PRNGKey(999)
+        net_params = params["mlp"]["net"]
+        net_params["dense_out"]["kernel"] = jax.random.normal(
+            k1, net_params["dense_out"]["kernel"].shape
+        ) * 0.5
+
+        x = jax.random.normal(key, (5, dim))
+        context1 = jax.random.normal(jax.random.PRNGKey(1), (5, context_dim))
+        context2 = jax.random.normal(jax.random.PRNGKey(2), (5, context_dim))
+
+        y1, _ = transform.forward(params, x, context1)
+        y2, _ = transform.forward(params, x, context2)
+
+        # Outputs should differ for different contexts
+        assert not jnp.allclose(y1, y2, atol=1e-3)
+
+    def test_create_invalid_context_dim_raises(self, key, dim):
+        """create raises ValueError for context_dim < 0."""
+        with pytest.raises(ValueError, match="context_dim must be non-negative"):
+            LinearTransform.create(key, dim=dim, context_dim=-1)
 
 
 class TestPermutationFactory:

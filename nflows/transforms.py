@@ -15,6 +15,47 @@ import nflows.scalar_function as scalar_function
 from .splines import rational_quadratic_spline
 
 
+def _compute_gate_value(identity_gate, context):
+    """
+    Compute gate value from context, handling batching via vmap.
+
+    When identity_gate(context) = 0, the transform should be the identity.
+    When identity_gate(context) = 1, the transform acts normally.
+
+    Arguments:
+        identity_gate: Callable that maps context -> scalar, or None.
+        context: Context tensor of shape (context_dim,) or (batch, context_dim), or None.
+
+    Returns:
+        Gate value array of shape () or (batch,), or None if identity_gate is None.
+
+    Raises:
+        ValueError: If identity_gate returns non-scalar output.
+    """
+    if identity_gate is None or context is None:
+        return None
+
+    # Handle single sample vs batch
+    if context.ndim == 1:
+        g_val = identity_gate(context)
+    else:
+        g_val = jax.vmap(identity_gate)(context)
+
+    g_val = jnp.asarray(g_val)
+
+    # Validate: should be scalar per sample
+    if context.ndim == 1 and g_val.ndim > 0:
+        raise ValueError(
+            f"identity_gate must return scalar, got shape {g_val.shape}"
+        )
+    if context.ndim > 1 and g_val.ndim > 1:
+        raise ValueError(
+            f"identity_gate must return scalar per sample, got shape {g_val.shape}"
+        )
+
+    return g_val
+
+
 def stable_logit(p: Array) -> Array:
     """
     Numerically stable logit function: logit(p) = log(p / (1 - p)).
@@ -42,9 +83,12 @@ class LinearTransform:
 
       L = tril(lower_raw, k = -1) + I        (unit-diagonal lower)
       U = triu(upper_raw, k = 1)             (zero diagonal upper)
-      s = exp(log_diag)                      (positive diagonal entries)
+      s = softplus(raw_diag + delta)         (positive diagonal entries)
       T = U + diag(s)                        (upper-triangular)
       W = L @ T
+
+    Where delta is either 0 (unconditional) or produced by a conditioner
+    network that takes context as input (conditional).
 
     For a column vector u, the forward map is:
 
@@ -56,7 +100,7 @@ class LinearTransform:
 
     The Jacobian of the forward map y = x W^T has determinant det(W), and
 
-      log |det W| = sum(log_diag).
+      log |det W| = sum(log(s)) = sum(log(softplus(raw_diag + delta))).
 
     Inverse uses triangular solves:
 
@@ -66,21 +110,30 @@ class LinearTransform:
     Parameters (per block):
       params["lower"]:    unconstrained raw lower-tri part, shape (dim, dim)
       params["upper"]:    unconstrained raw upper-tri part, shape (dim, dim)
-      params["log_diag"]: diagonal log-scales, shape (dim,)
+      params["raw_diag"]: unconstrained diagonal params, shape (dim,)
+      params["mlp"]:      conditioner params (only if context_dim > 0)
+
+    Conditional flows:
+      When context_dim > 0, a conditioner MLP maps context to delta_diag,
+      which is added to raw_diag before softplus. The MLP is initialized
+      with zero output, so the transform starts at identity.
 
     This yields O(dim^2) apply / inverse and O(dim) log-det, without any
     repeated matrix factorizations inside the forward pass.
     """
     dim: int
+    conditioner: MLP | None = None  # None if context_dim=0
+    context_dim: int = 0
 
-    def _reconstruct_L_U_s(self, params: Any) -> Tuple[Array, Array, Array]:
+    def _get_raw_params(self, params: Any) -> Tuple[Array, Array, Array]:
+        """Extract and validate raw parameters from params dict."""
         try:
             lower_raw = jnp.asarray(params["lower"])
             upper_raw = jnp.asarray(params["upper"])
-            log_diag = jnp.asarray(params["log_diag"])
+            raw_diag = jnp.asarray(params["raw_diag"])
         except Exception as e:
             raise KeyError(
-                "LinearTransform: params must contain 'lower', 'upper', 'log_diag'"
+                "LinearTransform: params must contain 'lower', 'upper', 'raw_diag'"
             ) from e
 
         if lower_raw.shape != (self.dim, self.dim):
@@ -93,98 +146,295 @@ class LinearTransform:
                 f"LinearTransform: upper must have shape ({self.dim}, {self.dim}), "
                 f"got {upper_raw.shape}"
             )
-        if log_diag.shape != (self.dim,):
+        if raw_diag.shape != (self.dim,):
             raise ValueError(
-                f"LinearTransform: log_diag must have shape ({self.dim},), "
-                f"got {log_diag.shape}"
+                f"LinearTransform: raw_diag must have shape ({self.dim},), "
+                f"got {raw_diag.shape}"
             )
 
-        L = jnp.tril(lower_raw, k=-1) + jnp.eye(self.dim, dtype=lower_raw.dtype)
-        U = jnp.triu(upper_raw, k=1)
-        s = jnp.exp(log_diag)
-        return L, U, s
+        return lower_raw, upper_raw, raw_diag
 
-    def forward(self, params: Any, x: Array, context: Array | None = None) -> Tuple[Array, Array]:
+    def _compute_diagonal(
+        self,
+        params: Any,
+        raw_diag: Array,
+        context: Array | None,
+    ) -> Array:
+        """
+        Compute diagonal scaling s from raw_diag and optional context.
+
+        If conditioner exists and context is provided, adds delta from conditioner.
+        Uses softplus for numerical stability.
+
+        Returns:
+            s: positive diagonal scaling, shape (dim,) or (batch, dim) if batched context.
+        """
+        if self.conditioner is not None and context is not None:
+            # Conditioner maps context -> delta_diag
+            mlp_params = params["mlp"]
+            # MLP with x_dim=context_dim, context_dim=0: pass context as x
+            delta = self.conditioner.apply({"params": mlp_params}, context, None)
+            # delta shape: (batch, dim) or (dim,)
+            s = jax.nn.softplus(raw_diag + delta)
+        else:
+            s = jax.nn.softplus(raw_diag)
+        return s
+
+    def _forward_batched_gate(
+        self,
+        x: Array,
+        lower_raw: Array,
+        upper_raw: Array,
+        s: Array,
+        g_value: Array,
+        batch_shape: tuple,
+    ) -> Tuple[Array, Array]:
+        """Forward pass with per-sample gating via vmap.
+
+        When g_value is batched, each sample needs its own L, U matrices
+        constructed with its gate value. This is slower than the shared-matrix
+        path but correctly handles per-sample identity interpolation.
+        """
+        # Gate the diagonal: s_gated = 1 + g * (s - 1)
+        g_diag = g_value[:, None]  # (B, 1)
+        if s.ndim == 1:
+            # s is (dim,) - broadcast to (B, dim)
+            s_gated = 1.0 - g_diag + g_diag * s
+        else:
+            # s is already (B, dim)
+            s_gated = 1.0 - g_diag + g_diag * s
+
+        dim = self.dim
+        dtype = lower_raw.dtype
+
+        def forward_single(x_i, g_i, s_i):
+            # Build gated LU factors: when g=0, L=I and U=0, so W=I (identity).
+            # When g=1, we get the full learned transform.
+            L_i = jnp.tril(g_i * lower_raw, k=-1) + jnp.eye(dim, dtype=dtype)
+            U_i = jnp.triu(g_i * upper_raw, k=1)
+            T_i = U_i + jnp.diag(s_i)
+            y_i = L_i @ T_i @ x_i
+            log_det_i = jnp.sum(jnp.log(s_i))
+            return y_i, log_det_i
+
+        # Flatten batch dims for vmap, then reshape back.
+        x_flat = x.reshape((-1, dim))
+        g_flat = g_value.reshape((-1,))
+        s_flat = s_gated.reshape((-1, dim))
+        y_flat, log_det_flat = jax.vmap(forward_single)(x_flat, g_flat, s_flat)
+        y = y_flat.reshape(batch_shape + (dim,))
+        log_det_forward = log_det_flat.reshape(batch_shape)
+        return y, log_det_forward
+
+    def _inverse_batched_gate(
+        self,
+        y: Array,
+        lower_raw: Array,
+        upper_raw: Array,
+        s: Array,
+        g_value: Array,
+        batch_shape: tuple,
+    ) -> Tuple[Array, Array]:
+        """Inverse pass with per-sample gating via vmap.
+
+        When g_value is batched, each sample needs its own L, U matrices
+        constructed with its gate value. This is slower than the shared-matrix
+        path but correctly handles per-sample identity interpolation.
+        """
+        # Gate the diagonal: s_gated = 1 + g * (s - 1)
+        g_diag = g_value[:, None]  # (B, 1)
+        if s.ndim == 1:
+            # s is (dim,) - broadcast to (B, dim)
+            s_gated = 1.0 - g_diag + g_diag * s
+        else:
+            # s is already (B, dim)
+            s_gated = 1.0 - g_diag + g_diag * s
+
+        dim = self.dim
+        dtype = lower_raw.dtype
+
+        def inverse_single(y_i, g_i, s_i):
+            # Build gated LU factors (same as forward).
+            L_i = jnp.tril(g_i * lower_raw, k=-1) + jnp.eye(dim, dtype=dtype)
+            U_i = jnp.triu(g_i * upper_raw, k=1)
+            T_i = U_i + jnp.diag(s_i)
+            # Solve L @ T @ x = y via two triangular solves.
+            a_i = jsp.solve_triangular(L_i, y_i, lower=True, unit_diagonal=True)
+            x_i = jsp.solve_triangular(T_i, a_i, lower=False)
+            log_det_i = -jnp.sum(jnp.log(s_i))
+            return x_i, log_det_i
+
+        # Flatten batch dims for vmap, then reshape back.
+        y_flat = y.reshape((-1, dim))
+        g_flat = g_value.reshape((-1,))
+        s_flat = s_gated.reshape((-1, dim))
+        x_flat, log_det_flat = jax.vmap(inverse_single)(y_flat, g_flat, s_flat)
+        x = x_flat.reshape(batch_shape + (dim,))
+        log_det_inverse = log_det_flat.reshape(batch_shape)
+        return x, log_det_inverse
+
+    def forward(
+        self,
+        params: Any,
+        x: Array,
+        context: Array | None = None,
+        g_value: Array | None = None,
+    ) -> Tuple[Array, Array]:
         """
         Forward map: x -> y, returning (y, log_det_forward).
 
         Arguments:
-          params: PyTree with leaves 'lower', 'upper', 'log_diag'.
+          params: PyTree with leaves 'lower', 'upper', 'raw_diag', and optionally 'mlp'.
           x: input tensor of shape (..., dim).
-          context: ignored (accepted for interface compatibility).
+          context: optional conditioning tensor, shape (..., context_dim).
+          g_value: optional gate value for identity_gate. When g_value=0, returns identity.
 
         Returns:
           y: transformed tensor of shape (..., dim).
-          log_det: log |det ∂y/∂x| = sum(log_diag), shape x.shape[:-1].
+          log_det: log |det ∂y/∂x| = sum(log(s)), shape x.shape[:-1].
         """
-        del context  # Unused in LinearTransform.
         if x.shape[-1] != self.dim:
             raise ValueError(
                 f"LinearTransform: expected input last dim {self.dim}, "
                 f"got {x.shape[-1]}"
             )
 
-        L, U, s = self._reconstruct_L_U_s(params)
-        T = U + jnp.diag(s)
-
-        # Flatten batch dims for simpler linear algebra.
+        # Get raw parameters with validation
+        lower_raw, upper_raw, raw_diag = self._get_raw_params(params)
         batch_shape = x.shape[:-1]
-        x_flat = x.reshape((-1, self.dim))  # (B, dim)
-        u = x_flat.T                        # (dim, B)
 
-        # Column-style forward: u' = L @ (T @ u)
-        a = T @ u
-        u_prime = L @ a
-        y_flat = u_prime.T                  # (B, dim)
-        y = y_flat.reshape(batch_shape + (self.dim,))
+        # Compute diagonal scaling (context-dependent if conditioner exists)
+        s = self._compute_diagonal(params, raw_diag, context)  # shape (dim,) or (batch, dim)
 
-        # log |det W| = sum(log_diag)
-        log_det_scalar = jnp.sum(jnp.log(s))  # or equivalently jnp.sum(log_diag)
-        log_det_forward = jnp.broadcast_to(log_det_scalar, batch_shape)
+        # Batched gate requires per-sample L, U - use dedicated vmap path
+        if g_value is not None and g_value.ndim > 0:
+            return self._forward_batched_gate(
+                x, lower_raw, upper_raw, s, g_value, batch_shape
+            )
+
+        # Fast path: shared L, U (possibly scaled by scalar gate)
+        if g_value is not None:
+            # Scalar gate - scale L, U and interpolate s
+            lower_raw = g_value * lower_raw
+            upper_raw = g_value * upper_raw
+            s = 1.0 - g_value + g_value * s
+
+        # Reconstruct L, U
+        L = jnp.tril(lower_raw, k=-1) + jnp.eye(self.dim, dtype=lower_raw.dtype)
+        U = jnp.triu(upper_raw, k=1)
+
+        # Handle batched s (when context is batched)
+        if s.ndim == 1:
+            # s is (dim,) - shared across batch
+            T = U + jnp.diag(s)
+            x_flat = x.reshape((-1, self.dim))  # (B, dim)
+            u = x_flat.T                        # (dim, B)
+            a = T @ u
+            u_prime = L @ a
+            y_flat = u_prime.T                  # (B, dim)
+            y = y_flat.reshape(batch_shape + (self.dim,))
+            # log |det W| = sum(log(s))
+            log_det_scalar = jnp.sum(jnp.log(s))
+            log_det_forward = jnp.broadcast_to(log_det_scalar, batch_shape)
+        else:
+            # s is (batch, dim) - different per sample, use vmap
+            def forward_single(x_i, s_i):
+                T_i = U + jnp.diag(s_i)
+                a_i = T_i @ x_i
+                y_i = L @ a_i
+                log_det_i = jnp.sum(jnp.log(s_i))
+                return y_i, log_det_i
+
+            x_flat = x.reshape((-1, self.dim))
+            s_flat = s.reshape((-1, self.dim))
+            y_flat, log_det_flat = jax.vmap(forward_single)(x_flat, s_flat)
+            y = y_flat.reshape(batch_shape + (self.dim,))
+            log_det_forward = log_det_flat.reshape(batch_shape)
+
         return y, log_det_forward
 
-    def inverse(self, params: Any, y: Array, context: Array | None = None) -> Tuple[Array, Array]:
+    def inverse(
+        self,
+        params: Any,
+        y: Array,
+        context: Array | None = None,
+        g_value: Array | None = None,
+    ) -> Tuple[Array, Array]:
         """
         Inverse map: y -> x, returning (x, log_det_inverse).
 
         Arguments:
-          params: PyTree with leaves 'lower', 'upper', 'log_diag'.
+          params: PyTree with leaves 'lower', 'upper', 'raw_diag', and optionally 'mlp'.
           y: input tensor of shape (..., dim).
-          context: ignored (accepted for interface compatibility).
+          context: optional conditioning tensor, shape (..., context_dim).
+          g_value: optional gate value for identity_gate. When g_value=0, returns identity.
 
         Returns:
           x: inverse-transformed tensor of shape (..., dim).
-          log_det: log |det ∂x/∂y| = -sum(log_diag), shape y.shape[:-1].
+          log_det: log |det ∂x/∂y| = -sum(log(s)), shape y.shape[:-1].
         """
-        del context  # Unused in LinearTransform.
         if y.shape[-1] != self.dim:
             raise ValueError(
                 f"LinearTransform: expected input last dim {self.dim}, "
                 f"got {y.shape[-1]}"
             )
 
-        L, U, s = self._reconstruct_L_U_s(params)
-        T = U + jnp.diag(s)
-
+        # Get raw parameters with validation
+        lower_raw, upper_raw, raw_diag = self._get_raw_params(params)
         batch_shape = y.shape[:-1]
-        y_flat = y.reshape((-1, self.dim))  # (B, dim)
-        u_prime = y_flat.T                  # (dim, B)
 
-        # Column-style inverse:
-        # 1) L a = u'   -> a
-        # 2) T u = a    -> u
-        a = jsp.solve_triangular(
-            L, u_prime, lower=True, unit_diagonal=True
-        )
-        u = jsp.solve_triangular(
-            T, a, lower=False
-        )
+        # Compute diagonal scaling (context-dependent if conditioner exists)
+        s = self._compute_diagonal(params, raw_diag, context)  # shape (dim,) or (batch, dim)
 
-        x_flat = u.T                        # (B, dim)
-        x = x_flat.reshape(batch_shape + (self.dim,))
+        # Batched gate requires per-sample L, U - use dedicated vmap path
+        if g_value is not None and g_value.ndim > 0:
+            return self._inverse_batched_gate(
+                y, lower_raw, upper_raw, s, g_value, batch_shape
+            )
 
-        log_det_scalar = jnp.sum(jnp.log(s))  # or sum(log_diag)
-        log_det_inverse = jnp.broadcast_to(-log_det_scalar, batch_shape)
+        # Fast path: shared L, U (possibly scaled by scalar gate)
+        if g_value is not None:
+            # Scalar gate - scale L, U and interpolate s
+            lower_raw = g_value * lower_raw
+            upper_raw = g_value * upper_raw
+            s = 1.0 - g_value + g_value * s
+
+        # Reconstruct L, U
+        L = jnp.tril(lower_raw, k=-1) + jnp.eye(self.dim, dtype=lower_raw.dtype)
+        U = jnp.triu(upper_raw, k=1)
+
+        # Handle batched s (when context is batched)
+        if s.ndim == 1:
+            # s is (dim,) - shared across batch
+            T = U + jnp.diag(s)
+            y_flat = y.reshape((-1, self.dim))  # (B, dim)
+            u_prime = y_flat.T                  # (dim, B)
+
+            # Column-style inverse:
+            # 1) L a = u'   -> a
+            # 2) T u = a    -> u
+            a = jsp.solve_triangular(L, u_prime, lower=True, unit_diagonal=True)
+            u = jsp.solve_triangular(T, a, lower=False)
+
+            x_flat = u.T
+            x = x_flat.reshape(batch_shape + (self.dim,))
+            log_det_scalar = jnp.sum(jnp.log(s))
+            log_det_inverse = jnp.broadcast_to(-log_det_scalar, batch_shape)
+        else:
+            # s is (batch, dim) - different per sample, use vmap
+            def inverse_single(y_i, s_i):
+                T_i = U + jnp.diag(s_i)
+                a_i = jsp.solve_triangular(L, y_i, lower=True, unit_diagonal=True)
+                x_i = jsp.solve_triangular(T_i, a_i, lower=False)
+                log_det_i = -jnp.sum(jnp.log(s_i))
+                return x_i, log_det_i
+
+            y_flat = y.reshape((-1, self.dim))
+            s_flat = s.reshape((-1, self.dim))
+            x_flat, log_det_flat = jax.vmap(inverse_single)(y_flat, s_flat)
+            x = x_flat.reshape(batch_shape + (self.dim,))
+            log_det_inverse = log_det_flat.reshape(batch_shape)
+
         return x, log_det_inverse
 
     def init_params(self, key: PRNGKey, context_dim: int = 0) -> dict:
@@ -192,45 +442,105 @@ class LinearTransform:
         Initialize parameters for this transform.
 
         Returns identity transform params (L=I, U=0, s=1 => W=I).
+        For softplus parametrization, raw_diag is initialized so softplus(raw_diag) = 1.
 
         Arguments:
-            key: JAX PRNGKey (unused, included for interface consistency).
-            context_dim: Context dimension (unused, included for interface consistency).
+            key: JAX PRNGKey for conditioner initialization.
+            context_dim: Context dimension (must match self.context_dim).
 
         Returns:
-            Dict with keys 'lower', 'upper', 'log_diag'.
+            Dict with keys 'lower', 'upper', 'raw_diag', and 'mlp' if context_dim > 0.
         """
-        del key, context_dim  # Unused for deterministic identity init.
-        return {
+        # softplus(x) = 1 when x = log(e - 1) ≈ 0.541
+        raw_diag_init = jnp.full((self.dim,), jnp.log(jnp.e - 1), dtype=jnp.float32)
+
+        params = {
             "lower": jnp.zeros((self.dim, self.dim), dtype=jnp.float32),
             "upper": jnp.zeros((self.dim, self.dim), dtype=jnp.float32),
-            "log_diag": jnp.zeros((self.dim,), dtype=jnp.float32),
+            "raw_diag": raw_diag_init,
         }
 
+        # Initialize conditioner if present
+        if self.conditioner is not None:
+            dummy_context = jnp.zeros((1, self.context_dim), dtype=jnp.float32)
+            variables = self.conditioner.init(key, dummy_context, None)
+            mlp_params = variables["params"]
+
+            # Zero-init output layer so delta=0 at init => identity transform
+            if hasattr(self.conditioner, "get_output_layer") and hasattr(self.conditioner, "set_output_layer"):
+                out_layer = self.conditioner.get_output_layer(mlp_params)
+                kernel = jnp.zeros_like(out_layer["kernel"])
+                bias = jnp.zeros_like(out_layer["bias"])
+                mlp_params = self.conditioner.set_output_layer(mlp_params, kernel, bias)
+
+            params["mlp"] = mlp_params
+
+        return params
+
     @classmethod
-    def create(cls, key: PRNGKey, dim: int) -> Tuple["LinearTransform", dict]:
+    def create(
+        cls,
+        key: PRNGKey,
+        dim: int,
+        *,
+        context_dim: int = 0,
+        hidden_dim: int = 64,
+        n_hidden_layers: int = 2,
+        activation: Callable[[Array], Array] = nn.tanh,
+        res_scale: float = 0.1,
+    ) -> Tuple["LinearTransform", dict]:
         """
         Factory method to create LinearTransform and initialize params.
 
         Arguments:
             key: JAX PRNGKey for parameter initialization.
             dim: Dimensionality of the transform.
+            context_dim: Context dimension (0 for unconditional).
+            hidden_dim: Width of hidden layers in conditioner MLP (if context_dim > 0).
+            n_hidden_layers: Number of residual blocks in conditioner MLP.
+            activation: Activation function for conditioner MLP.
+            res_scale: Residual connection scale for conditioner MLP.
 
         Returns:
             Tuple of (transform, params) ready to use.
 
         Raises:
-            ValueError: If dim <= 0.
+            ValueError: If dim <= 0 or context_dim < 0.
 
         Example:
+            >>> # Unconditional
             >>> transform, params = LinearTransform.create(key, dim=4)
             >>> y, log_det = transform.forward(params, x)
+
+            >>> # Conditional on context
+            >>> transform, params = LinearTransform.create(
+            ...     key, dim=4, context_dim=8, hidden_dim=64, n_hidden_layers=2
+            ... )
+            >>> y, log_det = transform.forward(params, x, context)
         """
         if dim <= 0:
             raise ValueError(f"LinearTransform.create: dim must be positive, got {dim}.")
+        if context_dim < 0:
+            raise ValueError(f"LinearTransform.create: context_dim must be non-negative, got {context_dim}.")
 
-        transform = cls(dim=dim)
-        params = transform.init_params(key)
+        # Create conditioner if context_dim > 0
+        conditioner = None
+        if context_dim > 0:
+            if hidden_dim <= 0:
+                raise ValueError(f"LinearTransform.create: hidden_dim must be positive, got {hidden_dim}.")
+            # MLP with x_dim=context_dim, context_dim=0: context goes in x slot
+            conditioner = MLP(
+                x_dim=context_dim,
+                context_dim=0,
+                hidden_dim=hidden_dim,
+                n_hidden_layers=n_hidden_layers,
+                out_dim=dim,  # output delta for each diagonal entry
+                activation=activation,
+                res_scale=res_scale,
+            )
+
+        transform = cls(dim=dim, conditioner=conditioner, context_dim=context_dim)
+        params = transform.init_params(key, context_dim=context_dim)
         return transform, params
 
 
@@ -415,7 +725,13 @@ class AffineCoupling:
 
         return coupling, params
 
-    def _condition(self, params: dict, x: Array, context: Array | None = None) -> Tuple[Array, Array]:
+    def _condition(
+        self,
+        params: dict,
+        x: Array,
+        context: Array | None = None,
+        g_value: Array | None = None,
+    ) -> Tuple[Array, Array]:
         """
         Run the conditioner network and produce shift and log_scale.
 
@@ -425,6 +741,9 @@ class AffineCoupling:
           input tensor of shape (..., dim).
         context:
           optional conditioning tensor of shape (..., context_dim) or (context_dim,).
+        g_value:
+          optional gate value from identity_gate(context). When g_value=0, the
+          transform should be identity, so shift and log_scale are zeroed.
         """
         if "mlp" not in params:
             raise KeyError(
@@ -464,9 +783,21 @@ class AffineCoupling:
         shift = jnp.tanh(shift / max_shift) * max_shift * m_unmasked
         log_scale = jnp.tanh(log_scale_raw / self.max_log_scale) * self.max_log_scale * m_unmasked
 
+        # Apply identity gate: when g_value=0, shift=0 and log_scale=0 => identity.
+        if g_value is not None:
+            g = g_value[..., None]  # broadcast to (..., 1) for element-wise multiply
+            shift = g * shift
+            log_scale = g * log_scale
+
         return shift, log_scale
 
-    def forward(self, params: dict, x: Array, context: Array | None = None) -> Tuple[Array, Array]:
+    def forward(
+        self,
+        params: dict,
+        x: Array,
+        context: Array | None = None,
+        g_value: Array | None = None,
+    ) -> Tuple[Array, Array]:
         """
         Forward transform: x -> y, returning (y, log_det).
 
@@ -476,12 +807,14 @@ class AffineCoupling:
           input tensor of shape (..., dim).
         context:
           optional conditioning tensor passed to the conditioner.
+        g_value:
+          optional gate value for identity_gate. When g_value=0, returns identity.
 
         Returns:
           y: transformed tensor of shape (..., dim).
           log_det: log |det J| with shape x.shape[:-1].
         """
-        shift, log_scale = self._condition(params, x, context)
+        shift, log_scale = self._condition(params, x, context, g_value=g_value)
 
         x1 = x * self.mask
         x2 = x * (1.0 - self.mask)
@@ -493,7 +826,13 @@ class AffineCoupling:
         log_det = jnp.sum(log_scale, axis=-1)
         return y, log_det
 
-    def inverse(self, params: dict, y: Array, context: Array | None = None) -> Tuple[Array, Array]:
+    def inverse(
+        self,
+        params: dict,
+        y: Array,
+        context: Array | None = None,
+        g_value: Array | None = None,
+    ) -> Tuple[Array, Array]:
         """
         Inverse transform: y -> x, returning (x, log_det).
 
@@ -503,12 +842,14 @@ class AffineCoupling:
           input tensor of shape (..., dim).
         context:
           optional conditioning tensor passed to the conditioner.
+        g_value:
+          optional gate value for identity_gate. When g_value=0, returns identity.
 
         Returns:
           x: inverse-transformed tensor of shape (..., dim).
           log_det: log |det d x / d y| with shape y.shape[:-1].
         """
-        shift, log_scale = self._condition(params, y, context)
+        shift, log_scale = self._condition(params, y, context, g_value=g_value)
 
         y1 = y * self.mask
         y2 = y * (1.0 - self.mask)
@@ -628,6 +969,16 @@ class SplineCoupling:
                 "identity-like initialization not possible, using midpoint derivative.",
                 stacklevel=2
             )
+
+        # Precompute the identity derivative logit for gating.
+        # When gated to zero, derivatives should interpolate to this value
+        # so that the spline derivative equals 1 (identity behavior).
+        if lo < 1.0 < hi:
+            alpha = (1.0 - lo) / (hi - lo)
+            self._identity_deriv_logit = stable_logit(jnp.array(alpha))
+        else:
+            # If 1.0 is outside the range, use midpoint (cannot achieve identity)
+            self._identity_deriv_logit = jnp.array(0.0)
 
     @staticmethod
     def required_out_dim(dim: int, num_bins: int) -> int:
@@ -766,7 +1117,13 @@ class SplineCoupling:
             )
         return dim
 
-    def _compute_spline_params(self, mlp_params: Any, x: Array, context: Array | None = None) -> Tuple[Array, Array, Array]:
+    def _compute_spline_params(
+        self,
+        mlp_params: Any,
+        x: Array,
+        context: Array | None = None,
+        g_value: Array | None = None,
+    ) -> Tuple[Array, Array, Array]:
         """
         Compute raw spline parameters from the conditioner and reshape them to:
           widths:      (..., dim, K)
@@ -777,6 +1134,8 @@ class SplineCoupling:
           mlp_params: parameters for the conditioner network.
           x: input tensor of shape (..., dim).
           context: optional conditioning tensor passed to the conditioner.
+          g_value: optional gate value. When g_value=0, spline params are set
+              to produce identity transform (uniform bins, derivative=1).
         """
         dim = x.shape[-1]
         K = self.num_bins
@@ -798,6 +1157,20 @@ class SplineCoupling:
         widths = theta[..., :K]                 # (..., dim, K)
         heights = theta[..., K : 2 * K]         # (..., dim, K)
         derivatives = theta[..., 2 * K :]       # (..., dim, K-1)
+
+        # Apply identity gate: when g_value=0, interpolate to identity spline params.
+        # Identity spline: widths=heights=0 (uniform bins after softmax), derivatives → 1.
+        if g_value is not None:
+            # g_value shape: () or (batch,). Broadcast to (..., 1, 1) for element-wise.
+            g = g_value[..., None, None]  # (..., 1, 1)
+
+            # widths/heights → 0 when g → 0 (uniform bins)
+            widths = g * widths
+            heights = g * heights
+
+            # derivatives: interpolate from identity_deriv_logit (gives d=1) to learned value
+            identity_d = self._identity_deriv_logit
+            derivatives = (1 - g) * identity_d + g * derivatives
 
         return widths, heights, derivatives
 
@@ -837,7 +1210,13 @@ class SplineCoupling:
 
         return y, logabsdet
 
-    def forward(self, params: Any, x: Array, context: Array | None = None) -> Tuple[Array, Array]:
+    def forward(
+        self,
+        params: Any,
+        x: Array,
+        context: Array | None = None,
+        g_value: Array | None = None,
+    ) -> Tuple[Array, Array]:
         """
         Forward map: x -> y with log_det_forward = log|det ∂y/∂x|.
 
@@ -845,11 +1224,14 @@ class SplineCoupling:
           params: dict with key "mlp" for conditioner parameters.
           x: input tensor of shape (..., dim).
           context: optional conditioning tensor passed to the conditioner.
+          g_value: optional gate value for identity_gate. When g_value=0, returns identity.
         """
         self._check_x(x)
         mlp_params = self._conditioner_params(params)
 
-        widths, heights, derivatives = self._compute_spline_params(mlp_params, x, context)
+        widths, heights, derivatives = self._compute_spline_params(
+            mlp_params, x, context, g_value=g_value
+        )
         y_spline, logabsdet_per_dim = self._apply_splines(
             x, widths, heights, derivatives, inverse=False
         )
@@ -861,7 +1243,13 @@ class SplineCoupling:
 
         return y, log_det
 
-    def inverse(self, params: Any, y: Array, context: Array | None = None) -> Tuple[Array, Array]:
+    def inverse(
+        self,
+        params: Any,
+        y: Array,
+        context: Array | None = None,
+        g_value: Array | None = None,
+    ) -> Tuple[Array, Array]:
         """
         Inverse map: y -> x with log_det_inverse = log|det ∂x/∂y|.
 
@@ -872,11 +1260,14 @@ class SplineCoupling:
           params: dict with key "mlp" for conditioner parameters.
           y: input tensor of shape (..., dim).
           context: optional conditioning tensor passed to the conditioner.
+          g_value: optional gate value for identity_gate. When g_value=0, returns identity.
         """
         self._check_x(y)
         mlp_params = self._conditioner_params(params)
 
-        widths, heights, derivatives = self._compute_spline_params(mlp_params, y, context)
+        widths, heights, derivatives = self._compute_spline_params(
+            mlp_params, y, context, g_value=g_value
+        )
         x_spline, logabsdet_per_dim = self._apply_splines(
             y, widths, heights, derivatives, inverse=True
         )
@@ -1095,6 +1486,12 @@ class Permutation:
 # ===================================================================
 # Composite Transform: Sequential composition of multiple transforms
 # ===================================================================
+def _block_supports_gvalue(block: Any) -> bool:
+    """Check if a transform block supports the g_value parameter."""
+    # These are the transform types that support identity gating.
+    return isinstance(block, (AffineCoupling, SplineCoupling, LinearTransform))
+
+
 @dataclass
 class CompositeTransform:
     """
@@ -1122,7 +1519,13 @@ class CompositeTransform:
     """
     blocks: List[Any]  # list of AffineCoupling, Permutation, etc
 
-    def forward(self, params: Sequence[Any], x: Array, context: Array | None = None) -> Tuple[Array, Array]:
+    def forward(
+        self,
+        params: Sequence[Any],
+        x: Array,
+        context: Array | None = None,
+        g_value: Array | None = None,
+    ) -> Tuple[Array, Array]:
         """
         Forward composition: x -> y, applying blocks in order.
 
@@ -1132,6 +1535,9 @@ class CompositeTransform:
           input tensor of shape (..., dim).
         context:
           optional conditioning tensor, passed to all sub-blocks.
+        g_value:
+          optional gate value for identity_gate. Passed to all sub-blocks that
+          support it (couplings, linear). When g_value=0, returns identity.
 
         Returns:
           y: transformed tensor of shape (..., dim).
@@ -1151,12 +1557,22 @@ class CompositeTransform:
         log_det_total = jnp.zeros(x.shape[:-1], dtype=accum_dtype)
 
         for block, p in zip(self.blocks, params):
-            y, log_det = block.forward(p, y, context)
+            # Pass g_value to blocks that support it (check for keyword argument)
+            if g_value is not None and _block_supports_gvalue(block):
+                y, log_det = block.forward(p, y, context, g_value=g_value)
+            else:
+                y, log_det = block.forward(p, y, context)
             log_det_total = log_det_total + log_det.astype(accum_dtype)
 
         return y, log_det_total.astype(x.dtype)
 
-    def inverse(self, params: Sequence[Any], y: Array, context: Array | None = None) -> Tuple[Array, Array]:
+    def inverse(
+        self,
+        params: Sequence[Any],
+        y: Array,
+        context: Array | None = None,
+        g_value: Array | None = None,
+    ) -> Tuple[Array, Array]:
         """
         Inverse composition: y -> x, applying blocks in reverse order.
 
@@ -1166,6 +1582,9 @@ class CompositeTransform:
           input tensor of shape (..., dim).
         context:
           optional conditioning tensor, passed to all sub-blocks.
+        g_value:
+          optional gate value for identity_gate. Passed to all sub-blocks that
+          support it. When g_value=0, returns identity.
 
         Returns:
           x: inverse-transformed tensor of shape (..., dim).
@@ -1186,7 +1605,11 @@ class CompositeTransform:
 
         # Reverse both blocks and parameter sequence.
         for block, p in zip(reversed(self.blocks), reversed(params)):
-            x, log_det = block.inverse(p, x, context)
+            # Pass g_value to blocks that support it
+            if g_value is not None and _block_supports_gvalue(block):
+                x, log_det = block.inverse(p, x, context, g_value=g_value)
+            else:
+                x, log_det = block.inverse(p, x, context)
             log_det_total = log_det_total + log_det.astype(accum_dtype)
 
         return x, log_det_total.astype(y.dtype)

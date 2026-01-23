@@ -191,7 +191,8 @@ def _gather_bin_params(
       d_left:   (...,)
       d_right:  (...,)
     """
-    # Left/right knot positions and derivatives.
+    # For K bins, we have K+1 knots. Slice to get left/right edges of each bin.
+    # *_all arrays have shape (..., K), indexed by bin number.
     x_left_all = x_k[..., :-1]
     x_right_all = x_k[..., 1:]
     y_left_all = y_k[..., :-1]
@@ -199,6 +200,8 @@ def _gather_bin_params(
     d_left_all = derivatives[..., :-1]
     d_right_all = derivatives[..., 1:]
 
+    # Use take_along_axis to gather the bin-specific values for each sample.
+    # idx has shape (..., 1) so the gather produces (..., 1), then we squeeze.
     idx = jnp.expand_dims(bin_idx, axis=-1)  # (..., 1)
 
     def gather(a: Array) -> Array:

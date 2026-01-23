@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Tuple
+from typing import Any, Callable, Tuple
 
 import jax
 import jax.numpy as jnp
+
+from .transforms import _compute_gate_value
 
 Array = jnp.ndarray
 PRNGKey = jax.Array  # JAX random key alias
@@ -32,9 +34,19 @@ class Bijection:
 
     This class only stores the *definitions* of transform and feature_extractor.
     It does not store any trainable parameters.
+
+    Identity gate:
+      If identity_gate is provided, it should be a callable that maps context to a
+      scalar gate value. When gate=0, the transform is the identity (y=x, log_det=0).
+      When gate=1, the transform acts normally. This enables smooth interpolation
+      between identity and the learned transform based on context.
+
+      Example: identity_gate = lambda ctx: jnp.sin(jnp.pi * ctx[0])
+      This gives identity at ctx[0]=0 and ctx[0]=1, and full transform at ctx[0]=0.5.
     """
     transform: Any
     feature_extractor: Any = None
+    identity_gate: Callable[[Array], Array] | None = None
 
     def _extract_context_features(self, params: Any, context: Array | None) -> Array | None:
         """
@@ -65,9 +77,12 @@ class Bijection:
           y: transformed samples, shape (..., dim).
           log_det: log |det ∂y/∂x|, shape (...,).
         """
+        # Compute gate value from RAW context (before feature extraction)
+        g_value = _compute_gate_value(self.identity_gate, context)
+
         context_features = self._extract_context_features(params, context)
         transform_params = params["transform"]
-        return self.transform.forward(transform_params, x, context_features)
+        return self.transform.forward(transform_params, x, context_features, g_value=g_value)
 
     def inverse(self, params: Any, y: Array, context: Array | None = None) -> Tuple[Array, Array]:
         """
@@ -82,9 +97,12 @@ class Bijection:
           x: original samples, shape (..., dim).
           log_det: log |det ∂x/∂y|, shape (...,).
         """
+        # Compute gate value from RAW context (before feature extraction)
+        g_value = _compute_gate_value(self.identity_gate, context)
+
         context_features = self._extract_context_features(params, context)
         transform_params = params["transform"]
-        return self.transform.inverse(transform_params, y, context_features)
+        return self.transform.inverse(transform_params, y, context_features, g_value=g_value)
 
 
 @dataclass
@@ -114,10 +132,23 @@ class Flow:
 
     This class only stores the *definitions* of base_dist, transform, and
     feature_extractor. It does not store any trainable parameters.
+
+    Identity gate:
+      If identity_gate is provided, it should be a callable that maps context to a
+      scalar gate value. When gate=0, the transform is the identity (y=x, log_det=0).
+      When gate=1, the transform acts normally. This enables smooth interpolation
+      between identity and the learned transform based on context.
+
+      The gate is computed from RAW context (before feature extraction), allowing
+      the gate function to operate on the original context values.
+
+      Example: identity_gate = lambda ctx: jnp.sin(jnp.pi * ctx[0])
+      This gives identity at ctx[0]=0 and ctx[0]=1, and full transform at ctx[0]=0.5.
     """
     base_dist: Any
     transform: Any
     feature_extractor: Any = None
+    identity_gate: Callable[[Array], Array] | None = None
 
     # --------------------------------------------------------------
     # Context feature extraction
@@ -154,9 +185,12 @@ class Flow:
           x: transformed samples, shape (..., dim).
           log_det: log |det ∂x/∂z|, shape (...,).
         """
+        # Compute gate value from RAW context (before feature extraction)
+        g_value = _compute_gate_value(self.identity_gate, context)
+
         context_features = self._extract_context_features(params, context)
         transform_params = params["transform"]
-        x, log_det = self.transform.forward(transform_params, z, context_features)
+        x, log_det = self.transform.forward(transform_params, z, context_features, g_value=g_value)
         return x, log_det
 
     def inverse(self, params: Any, x: Array, context: Array | None = None) -> Tuple[Array, Array]:
@@ -172,9 +206,12 @@ class Flow:
           z: latent samples, shape (..., dim).
           log_det: log |det ∂z/∂x|, shape (...,).
         """
+        # Compute gate value from RAW context (before feature extraction)
+        g_value = _compute_gate_value(self.identity_gate, context)
+
         context_features = self._extract_context_features(params, context)
         transform_params = params["transform"]
-        z, log_det = self.transform.inverse(transform_params, x, context_features)
+        z, log_det = self.transform.inverse(transform_params, x, context_features, g_value=g_value)
         return z, log_det
 
     # --------------------------------------------------------------
@@ -264,13 +301,16 @@ class Flow:
           x: samples from q(x | context), shape (*shape, dim).
           log_q: log q(x | context) evaluated at these samples, shape (*shape,).
         """
+        # Compute gate value from RAW context (before feature extraction)
+        g_value = _compute_gate_value(self.identity_gate, context)
+
         context_features = self._extract_context_features(params, context)
         base_params = params["base"]
         transform_params = params["transform"]
 
         key_z, _ = jax.random.split(key)
         z = self.base_dist.sample(base_params, key_z, shape)
-        x, log_det_fwd = self.transform.forward(transform_params, z, context_features)
+        x, log_det_fwd = self.transform.forward(transform_params, z, context_features, g_value=g_value)
         base_log = self.base_dist.log_prob(base_params, z)
         log_q = base_log - log_det_fwd
         return x, log_q

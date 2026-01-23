@@ -58,7 +58,7 @@ class TestBuildRealNVP:
         first_params = params["transform"][0]
         assert "lower" in first_params
         assert "upper" in first_params
-        assert "log_diag" in first_params
+        assert "raw_diag" in first_params
 
     def test_use_linear_invertibility(self, key, dim):
         """Flow with use_linear=True is invertible."""
