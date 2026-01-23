@@ -247,14 +247,35 @@ z, log_det = transform.inverse(params, x, context=None)
 
 ## Conditioning
 
-For conditional flows, context is concatenated to the masked input before the conditioner MLP:
+For conditional flows, set `context_dim > 0`. The context is concatenated to the masked input before each conditioner MLP:
 
 ```python
-# input to MLP = [x_masked, context]
 flow, params = build_realnvp(..., context_dim=2)
+
+# Context can be per-sample or shared
+samples = flow.sample(params, key, (1000,), context=context)  # (1000, 2) or (2,)
 ```
 
-Context can be per-sample `(batch, context_dim)` or shared `(context_dim,)`.
+### Feature Extractor
+
+For high-dimensional or heterogeneous context, a learned feature extractor can transform the raw context before it reaches the coupling layers:
+
+```python
+flow, params = build_realnvp(
+    ...,
+    context_dim=16,                     # Raw context dimension
+    context_extractor_hidden_dim=64,    # Enable feature extractor (0 = disabled)
+    context_extractor_n_layers=2,       # Depth of extractor network
+    context_feature_dim=8,              # Output dimension (default: same as context_dim)
+)
+```
+
+When enabled:
+1. Raw context passes through a shared ResNet once per forward/inverse call
+2. The extracted features (dimension `context_feature_dim`) are used by all coupling layers
+3. Gradients flow through the extractor for end-to-end training
+
+The feature extractor parameters are stored in `params["feature_extractor"]`.
 
 ## Training
 
