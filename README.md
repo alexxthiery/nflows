@@ -187,19 +187,15 @@ y, log_det = bijection.forward(params, x, context=raw_context)
 x_rec, _ = bijection.inverse(params, y, context=raw_context)
 ```
 
-### Identity Gating (Time-Dependent Flows)
+### Identity Gating
 
-Smoothly interpolate between identity and learned transform based on context.
-The gate function maps context to a scalar:
-- **gate = 0**: transform is identity (x → x, log_det = 0)
-- **gate = 1**: transform acts normally
-- **0 < gate < 1**: interpolates between identity and learned transform
+Enforce that the transform is identity at specific context values. The gate function maps context to a scalar—wherever it returns 0, the transform becomes identity (x → x, log_det = 0).
 
 ```python
 import jax.numpy as jnp
 from nflows.builders import build_realnvp
 
-# Gate = t*(1-t): returns 0 at t=0 and t=1, peaks at t=0.5
+# Gate = t*(1-t): zero at t=0 and t=1, nonzero in between
 gate_fn = lambda ctx: ctx[0] * (1 - ctx[0])
 
 flow, params = build_realnvp(
@@ -209,10 +205,10 @@ flow, params = build_realnvp(
 )
 
 # At t=0 or t=1: gate=0 → F(x) = x (identity)
-# At t=0.5: gate=0.25 → partial interpolation toward learned transform
+# At t=0.5: gate=0.25 → learned transform (scaled by gate)
 ```
 
-Use cases: time-dependent flows, boundary conditions, curriculum learning.
+Use cases: boundary conditions, time-dependent flows where endpoints must be identity.
 
 ## Architecture
 
