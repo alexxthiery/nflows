@@ -2,6 +2,12 @@
 
 Recipes for adding custom Transforms, Distributions, and Conditioners.
 
+**Contents:**
+
+- [Adding a Custom Transform](#adding-a-custom-transform)
+- [Adding a Custom Distribution](#adding-a-custom-distribution)
+- [Adding a Custom Conditioner](#adding-a-custom-conditioner)
+
 ---
 
 ## Adding a Custom Transform
@@ -90,7 +96,7 @@ Use with `Flow` as the base distribution:
 ```python
 from nflows.flows import Flow
 
-flow = Flow(transform=my_transform, base_dist=my_distribution, dim=dim)
+flow = Flow(base_dist=my_distribution, transform=my_transform)
 log_prob = flow.log_prob(params, x)
 samples = flow.sample(params, key, (batch_size,))
 ```

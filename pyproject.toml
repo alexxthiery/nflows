@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "nflows"
+version = "0.1.0"
+description = "Minimal normalizing flows in JAX"
+requires-python = ">=3.10"
+dependencies = [
+    "jax>=0.4",
+    "jaxlib>=0.4",
+    "flax>=0.8",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["nflows*"]
