@@ -17,23 +17,23 @@ Minimal normalizing flows library in JAX. Provides RealNVP and spline flow build
 
 ```
 nflows/
-  __init__.py          (0 lines, empty)
-  builders.py          (928 lines) High-level constructors + assembly API
-  flows.py             (301 lines) Flow and Bijection classes
-  transforms.py        (1945 lines) All transform types + CompositeTransform
-  distributions.py     (123 lines) StandardNormal, DiagNormal
-  nets.py              (373 lines) MLP conditioner, ResNet init
-  splines.py           (472 lines) Rational-quadratic spline primitives
-  scalar_function.py   (99 lines)  LOFT forward/inverse scalar functions
+  __init__.py          empty
+  builders.py          High-level constructors + assembly API
+  flows.py             Flow and Bijection classes
+  transforms.py        All transform types + CompositeTransform
+  distributions.py     StandardNormal, DiagNormal
+  nets.py              MLP conditioner, ResNet init
+  splines.py           Rational-quadratic spline primitives
+  scalar_function.py   LOFT forward/inverse scalar functions
 tests/
-  conftest.py          (51 lines)  Shared fixtures + check_logdet_vs_autodiff
-  test_builders.py     (997 lines)
-  test_transforms.py   (1299 lines)
-  test_identity_gate.py (745 lines)
-  test_conditional_flow.py (543 lines)
-  test_splines.py      (681 lines)
-  test_distributions.py (200 lines)
-  test_nets.py         (478 lines)
+  conftest.py          Shared fixtures + check_logdet_vs_autodiff
+  test_builders.py
+  test_transforms.py
+  test_identity_gate.py
+  test_conditional_flow.py
+  test_splines.py
+  test_distributions.py
+  test_nets.py
 ```
 
 ## Module Dependency Graph
