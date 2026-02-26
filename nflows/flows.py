@@ -5,12 +5,29 @@ from dataclasses import dataclass
 from typing import Any, Callable, Tuple
 
 import jax
-import jax.numpy as jnp
 
+from .nets import Array, PRNGKey
 from .transforms import _compute_gate_value
 
-Array = jnp.ndarray
-PRNGKey = jax.Array  # JAX random key alias
+
+def _extract_context_features(
+    feature_extractor, params: Any, context: Array | None,
+) -> Array | None:
+    """
+    Extract features from context using a feature extractor if available.
+
+    Arguments:
+      feature_extractor: Flax module or None.
+      params: PyTree that may contain "feature_extractor" key.
+      context: raw context tensor, or None.
+
+    Returns:
+      Extracted context features, or original context if no extractor.
+    """
+    if feature_extractor is None or context is None:
+        return context
+    fe_params = params["feature_extractor"]
+    return feature_extractor.apply({"params": fe_params}, context)
 
 
 @dataclass
@@ -58,22 +75,6 @@ class Bijection:
     feature_extractor: Any = None
     identity_gate: Callable[[Array], Array] | None = None
 
-    def _extract_context_features(self, params: Any, context: Array | None) -> Array | None:
-        """
-        Extract features from context using the feature extractor if available.
-
-        Arguments:
-          params: PyTree that may contain "feature_extractor" key.
-          context: raw context tensor, or None.
-
-        Returns:
-          Extracted context features, or original context if no extractor.
-        """
-        if self.feature_extractor is None or context is None:
-            return context
-        fe_params = params["feature_extractor"]
-        return self.feature_extractor.apply({"params": fe_params}, context)
-
     def forward(self, params: Any, x: Array, context: Array | None = None) -> Tuple[Array, Array]:
         """
         Forward map: x -> y.
@@ -87,10 +88,8 @@ class Bijection:
           y: transformed samples, shape (..., dim).
           log_det: log |det ∂y/∂x|, shape (...,).
         """
-        # Compute gate value from RAW context (before feature extraction)
         g_value = _compute_gate_value(self.identity_gate, context)
-
-        context_features = self._extract_context_features(params, context)
+        context_features = _extract_context_features(self.feature_extractor, params, context)
         transform_params = params["transform"]
         return self.transform.forward(transform_params, x, context_features, g_value=g_value)
 
@@ -107,10 +106,8 @@ class Bijection:
           x: original samples, shape (..., dim).
           log_det: log |det ∂x/∂y|, shape (...,).
         """
-        # Compute gate value from RAW context (before feature extraction)
         g_value = _compute_gate_value(self.identity_gate, context)
-
-        context_features = self._extract_context_features(params, context)
+        context_features = _extract_context_features(self.feature_extractor, params, context)
         transform_params = params["transform"]
         return self.transform.inverse(transform_params, y, context_features, g_value=g_value)
 
@@ -168,25 +165,6 @@ class Flow:
     identity_gate: Callable[[Array], Array] | None = None
 
     # --------------------------------------------------------------
-    # Context feature extraction
-    # --------------------------------------------------------------
-    def _extract_context_features(self, params: Any, context: Array | None) -> Array | None:
-        """
-        Extract features from context using the feature extractor if available.
-
-        Arguments:
-          params: PyTree that may contain "feature_extractor" key.
-          context: raw context tensor, or None.
-
-        Returns:
-          Extracted context features, or original context if no extractor.
-        """
-        if self.feature_extractor is None or context is None:
-            return context
-        fe_params = params["feature_extractor"]
-        return self.feature_extractor.apply({"params": fe_params}, context)
-
-    # --------------------------------------------------------------
     # Low-level: forward / inverse maps
     # --------------------------------------------------------------
     def forward(self, params: Any, z: Array, context: Array | None = None) -> Tuple[Array, Array]:
@@ -202,10 +180,8 @@ class Flow:
           x: transformed samples, shape (..., dim).
           log_det: log |det ∂x/∂z|, shape (...,).
         """
-        # Compute gate value from RAW context (before feature extraction)
         g_value = _compute_gate_value(self.identity_gate, context)
-
-        context_features = self._extract_context_features(params, context)
+        context_features = _extract_context_features(self.feature_extractor, params, context)
         transform_params = params["transform"]
         x, log_det = self.transform.forward(transform_params, z, context_features, g_value=g_value)
         return x, log_det
@@ -223,10 +199,8 @@ class Flow:
           z: latent samples, shape (..., dim).
           log_det: log |det ∂z/∂x|, shape (...,).
         """
-        # Compute gate value from RAW context (before feature extraction)
         g_value = _compute_gate_value(self.identity_gate, context)
-
-        context_features = self._extract_context_features(params, context)
+        context_features = _extract_context_features(self.feature_extractor, params, context)
         transform_params = params["transform"]
         z, log_det = self.transform.inverse(transform_params, x, context_features, g_value=g_value)
         return z, log_det
@@ -271,9 +245,7 @@ class Flow:
           x: samples in data space, shape (*shape, dim).
         """
         base_params = params["base"]
-        # We only need a single key here, but split for possible future use.
-        key_base, _ = jax.random.split(key)
-        z = self.base_dist.sample(base_params, key_base, shape)
+        z = self.base_dist.sample(base_params, key, shape)
         x, _ = self.forward(params, z, context)
         return x
 
@@ -318,15 +290,12 @@ class Flow:
           x: samples from q(x | context), shape (*shape, dim).
           log_q: log q(x | context) evaluated at these samples, shape (*shape,).
         """
-        # Compute gate value from RAW context (before feature extraction)
         g_value = _compute_gate_value(self.identity_gate, context)
-
-        context_features = self._extract_context_features(params, context)
+        context_features = _extract_context_features(self.feature_extractor, params, context)
         base_params = params["base"]
         transform_params = params["transform"]
 
-        key_z, _ = jax.random.split(key)
-        z = self.base_dist.sample(base_params, key_z, shape)
+        z = self.base_dist.sample(base_params, key, shape)
         x, log_det_fwd = self.transform.forward(transform_params, z, context_features, g_value=g_value)
         base_log = self.base_dist.log_prob(base_params, z)
         log_q = base_log - log_det_fwd

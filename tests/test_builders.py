@@ -10,7 +10,6 @@ from nflows.builders import (
     build_realnvp,
     build_spline_realnvp,
     analyze_mask_coverage,
-    _make_alternating_mask,
     make_alternating_mask,
     create_feature_extractor,
     assemble_bijection,
@@ -282,23 +281,23 @@ class TestBuildSplineRealNVP:
 # Helper Function Tests
 # ============================================================================
 class TestMakeAlternatingMask:
-    """Tests for _make_alternating_mask helper."""
+    """Tests for make_alternating_mask helper."""
 
     def test_parity_0(self):
         """parity=0 produces [1, 0, 1, 0, ...]."""
-        mask = _make_alternating_mask(dim=4, parity=0)
+        mask = make_alternating_mask(dim=4, parity=0)
         expected = jnp.array([1, 0, 1, 0], dtype=jnp.float32)
         assert jnp.allclose(mask, expected)
 
     def test_parity_1(self):
         """parity=1 produces [0, 1, 0, 1, ...]."""
-        mask = _make_alternating_mask(dim=4, parity=1)
+        mask = make_alternating_mask(dim=4, parity=1)
         expected = jnp.array([0, 1, 0, 1], dtype=jnp.float32)
         assert jnp.allclose(mask, expected)
 
     def test_odd_dim(self):
         """Works with odd dimensions."""
-        mask = _make_alternating_mask(dim=5, parity=0)
+        mask = make_alternating_mask(dim=5, parity=0)
         expected = jnp.array([1, 0, 1, 0, 1], dtype=jnp.float32)
         assert jnp.allclose(mask, expected)
 

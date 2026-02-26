@@ -28,7 +28,7 @@ import jax
 import jax.numpy as jnp
 import jax.nn as jnn
 
-Array = jnp.ndarray
+from .nets import Array
 
 
 def _normalize_bin_params(
@@ -119,9 +119,7 @@ def _normalize_bin_params(
             f"{num_bins - 1}, got {unnormalized_derivatives.shape[-1]}."
         )
 
-    # internal_derivatives = min_derivative + jnn.softplus(unnormalized_derivatives)
-    
-    # Use sigmoid to also enforce an lower/upper bound on derivatives for stability.
+    # Use sigmoid to enforce a lower/upper bound on derivatives for stability.
     internal_derivatives = (
         min_derivative
         + (max_derivative - min_derivative)

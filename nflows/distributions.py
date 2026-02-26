@@ -7,8 +7,7 @@ from typing import Any, Tuple
 import jax
 import jax.numpy as jnp
 
-Array = jnp.ndarray
-PRNGKey = jax.Array  # JAX random key alias
+from .nets import Array, PRNGKey
 
 
 # ----------------------------------------------------------------------

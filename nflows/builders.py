@@ -100,10 +100,6 @@ def make_alternating_mask(dim: int, parity: int) -> Array:
     return mask
 
 
-# Keep private alias for backward compatibility within module
-_make_alternating_mask = make_alternating_mask
-
-
 # ====================================================================
 # Feature extractor creation
 # ====================================================================
@@ -260,20 +256,6 @@ def _validate_blocks_and_params(
         block_params.append(params)
 
     return blocks, block_params
-
-
-def _infer_dim_from_blocks(blocks: List[Any]) -> int | None:
-    """
-    Infer dimension from coupling-like blocks by checking mask shape.
-
-    Returns:
-        Inferred dimension, or None if no coupling blocks found.
-    """
-    for block in blocks:
-        mask = getattr(block, "mask", None)
-        if mask is not None:
-            return int(jnp.asarray(mask).shape[0])
-    return None
 
 
 def _check_dimension_consistency(blocks: List[Any], function_name: str) -> int | None:
@@ -511,6 +493,153 @@ def assemble_flow(
 
 
 # ====================================================================
+# Shared builder helpers
+# ====================================================================
+def _validate_builder_args(
+    func_name: str,
+    dim: int,
+    num_layers: int,
+    context_dim: int,
+    identity_gate: Callable[[Array], Array] | None,
+    use_permutation: bool,
+    context_extractor_hidden_dim: int,
+) -> None:
+    """Validate arguments common to build_realnvp and build_spline_realnvp."""
+    if dim <= 0:
+        raise ValueError(f"{func_name}: dim must be positive, got {dim}.")
+    if num_layers <= 0:
+        raise ValueError(f"{func_name}: num_layers must be positive, got {num_layers}.")
+    if context_dim < 0:
+        raise ValueError(f"{func_name}: context_dim must be non-negative, got {context_dim}.")
+    if identity_gate is not None and use_permutation:
+        raise ValueError(
+            f"{func_name}: identity_gate is incompatible with use_permutation=True. "
+            "Permutation cannot be smoothly interpolated to identity."
+        )
+    if identity_gate is not None and context_dim == 0:
+        raise ValueError(
+            f"{func_name}: identity_gate requires context_dim > 0 "
+            "(gate function operates on context)."
+        )
+    validate_identity_gate(identity_gate, context_dim)
+    if context_extractor_hidden_dim > 0 and context_dim == 0:
+        raise ValueError(
+            f"{func_name}: context_extractor_hidden_dim > 0 requires context_dim > 0."
+        )
+
+
+def _build_coupling_flow(
+    key: PRNGKey,
+    dim: int,
+    num_layers: int,
+    coupling_factory: Callable,
+    *,
+    context_dim: int,
+    context_extractor_hidden_dim: int,
+    context_extractor_n_layers: int,
+    context_feature_dim: int | None,
+    activation: Callable[[Array], Array],
+    res_scale: float,
+    use_permutation: bool,
+    use_linear: bool,
+    use_loft: bool,
+    loft_tau: float,
+    trainable_base: bool,
+    base_dist: Any | None,
+    base_params: Any | None,
+    return_transform_only: bool,
+    identity_gate: Callable[[Array], Array] | None,
+) -> Tuple[Flow | Bijection, Any]:
+    """
+    Shared assembly logic for coupling-based flows.
+
+    Arguments:
+      coupling_factory: Callable(key, mask, effective_context_dim) -> (coupling, params).
+          Encapsulates coupling-specific creation logic (AffineCoupling vs SplineCoupling).
+          effective_context_dim is the context dimension after optional feature extraction.
+      All other arguments match build_realnvp / build_spline_realnvp.
+    """
+    # Context feature extractor (optional)
+    key, fe_key = jax.random.split(key)
+    feature_extractor, fe_params, effective_context_dim = _init_context_extractor(
+        fe_key, context_dim, context_extractor_hidden_dim, context_extractor_n_layers,
+        context_feature_dim, activation, res_scale,
+    )
+
+    # Base distribution (skip if only returning transform)
+    base = None
+    base_params_resolved = None
+    if not return_transform_only:
+        base, base_params_resolved = _resolve_base_distribution(
+            dim, trainable_base, base_dist, base_params
+        )
+
+    # Build transform blocks
+    keys = jax.random.split(key, num_layers)
+    blocks = []
+    block_params = []
+
+    if use_linear:
+        key, lin_key = jax.random.split(key)
+        lin_block, lin_params = LinearTransform.create(lin_key, dim=dim)
+        blocks.append(lin_block)
+        block_params.append(lin_params)
+
+    parity = 0
+    for layer_idx in range(num_layers):
+        mask = make_alternating_mask(dim, parity)
+        parity = 1 - parity
+
+        coupling, coupling_params = coupling_factory(
+            keys[layer_idx], mask, effective_context_dim,
+        )
+        blocks.append(coupling)
+        block_params.append(coupling_params)
+
+        if use_permutation and layer_idx != num_layers - 1:
+            perm = jnp.arange(dim - 1, -1, -1)
+            perm_block, perm_params = Permutation.create(keys[layer_idx], perm=perm)
+            blocks.append(perm_block)
+            block_params.append(perm_params)
+
+    if use_loft:
+        key, loft_key = jax.random.split(key)
+        loft_block, loft_params = LoftTransform.create(loft_key, dim=dim, tau=loft_tau)
+        blocks.append(loft_block)
+        block_params.append(loft_params)
+
+    transform = CompositeTransform(blocks=blocks)
+    analyze_mask_coverage(blocks, dim)
+
+    # Assemble final object
+    if return_transform_only:
+        params: Dict[str, Any] = {"transform": block_params}
+        if feature_extractor is not None:
+            params["feature_extractor"] = fe_params
+        bijection = Bijection(
+            transform=transform,
+            feature_extractor=feature_extractor,
+            identity_gate=identity_gate,
+        )
+        return bijection, params
+
+    params = {
+        "base": base_params_resolved,
+        "transform": block_params,
+    }
+    if feature_extractor is not None:
+        params["feature_extractor"] = fe_params
+
+    flow = Flow(
+        base_dist=base,
+        transform=transform,
+        feature_extractor=feature_extractor,
+        identity_gate=identity_gate,
+    )
+    return flow, params
+
+
+# ====================================================================
 # RealNVP builder
 # ====================================================================
 def build_realnvp(
@@ -610,127 +739,37 @@ def build_realnvp(
         bijection: Bijection object (transform + optional feature extractor).
         params: PyTree with keys "transform" and optionally "feature_extractor".
     """
-    if dim <= 0:
-        raise ValueError(f"build_realnvp: dim must be positive, got {dim}.")
-    if num_layers <= 0:
-        raise ValueError(
-            f"build_realnvp: num_layers must be positive, got {num_layers}."
-        )
-    if context_dim < 0:
-        raise ValueError(
-            f"build_realnvp: context_dim must be non-negative, got {context_dim}."
-        )
-    if identity_gate is not None and use_permutation:
-        raise ValueError(
-            "build_realnvp: identity_gate is incompatible with use_permutation=True. "
-            "Permutation cannot be smoothly interpolated to identity."
-        )
-    if identity_gate is not None and context_dim == 0:
-        raise ValueError(
-            "build_realnvp: identity_gate requires context_dim > 0 "
-            "(gate function operates on context)."
-        )
-    validate_identity_gate(identity_gate, context_dim)
-
-    # Context feature extractor (optional)
-    if context_extractor_hidden_dim > 0 and context_dim == 0:
-        raise ValueError(
-            "build_realnvp: context_extractor_hidden_dim > 0 requires context_dim > 0."
-        )
-    key, fe_key = jax.random.split(key)
-    feature_extractor, fe_params, effective_context_dim = _init_context_extractor(
-        fe_key, context_dim, context_extractor_hidden_dim, context_extractor_n_layers,
-        context_feature_dim, activation, res_scale,
+    _validate_builder_args(
+        "build_realnvp", dim, num_layers, context_dim,
+        identity_gate, use_permutation, context_extractor_hidden_dim,
     )
 
-    # Base distribution (skip if only returning transform)
-    if not return_transform_only:
-        base, base_params_resolved = _resolve_base_distribution(
-            dim, trainable_base, base_dist, base_params
+    def coupling_factory(layer_key, mask, effective_context_dim):
+        return AffineCoupling.create(
+            layer_key, dim=dim, mask=mask,
+            hidden_dim=hidden_dim, n_hidden_layers=n_hidden_layers,
+            context_dim=effective_context_dim, activation=activation,
+            res_scale=res_scale, max_log_scale=max_log_scale,
         )
 
-    # --------------------------------------------------------------
-    # Transform: stack of affine couplings (and optional permutations)
-    # --------------------------------------------------------------
-    keys = jax.random.split(key, num_layers)
-
-    blocks = []
-    block_params = []
-
-    # Optional global linear layer at the beginning of the transform.
-    if use_linear:
-        key, lin_key = jax.random.split(key)
-        lin_block, lin_params = LinearTransform.create(lin_key, dim=dim)
-        blocks.append(lin_block)
-        block_params.append(lin_params)
-
-    parity = 0  # start with [1, 0, 1, 0, ...]
-    for layer_idx in range(num_layers):
-        mask = _make_alternating_mask(dim, parity)
-        parity = 1 - parity  # flip parity for next layer
-
-        coupling, coupling_params = AffineCoupling.create(
-            keys[layer_idx],
-            dim=dim,
-            mask=mask,
-            hidden_dim=hidden_dim,
-            n_hidden_layers=n_hidden_layers,
-            context_dim=effective_context_dim,
-            activation=activation,
-            res_scale=res_scale,
-            max_log_scale=max_log_scale,
-        )
-        blocks.append(coupling)
-        block_params.append(coupling_params)
-
-        # Optionally insert a permutation between coupling layers,
-        # but not after the last one.
-        if use_permutation and layer_idx != num_layers - 1:
-            perm = jnp.arange(dim - 1, -1, -1)  # simple fixed reverse permutation
-            perm_block, perm_params = Permutation.create(keys[layer_idx], perm=perm)
-            blocks.append(perm_block)
-            block_params.append(perm_params)
-
-    # Optional final LOFT transform for tail stabilization
-    if use_loft:
-        key, loft_key = jax.random.split(key)
-        loft_block, loft_params = LoftTransform.create(loft_key, dim=dim, tau=loft_tau)
-        blocks.append(loft_block)
-        block_params.append(loft_params)
-
-    transform = CompositeTransform(blocks=blocks)
-
-    # Analyze mask coverage to catch potential issues.
-    analyze_mask_coverage(blocks, dim)
-
-    # Build params and return object based on return_transform_only
-    if return_transform_only:
-        params = {"transform": block_params}
-        if feature_extractor is not None:
-            params["feature_extractor"] = fe_params
-        bijection = Bijection(
-            transform=transform,
-            feature_extractor=feature_extractor,
-            identity_gate=identity_gate,
-        )
-        return bijection, params
-
-    params = {
-        "base": base_params_resolved,
-        "transform": block_params,
-    }
-    if feature_extractor is not None:
-        params["feature_extractor"] = fe_params
-
-    flow = Flow(
-        base_dist=base,
-        transform=transform,
-        feature_extractor=feature_extractor,
+    return _build_coupling_flow(
+        key, dim, num_layers, coupling_factory,
+        context_dim=context_dim,
+        context_extractor_hidden_dim=context_extractor_hidden_dim,
+        context_extractor_n_layers=context_extractor_n_layers,
+        context_feature_dim=context_feature_dim,
+        activation=activation, res_scale=res_scale,
+        use_permutation=use_permutation, use_linear=use_linear,
+        use_loft=use_loft, loft_tau=loft_tau,
+        trainable_base=trainable_base, base_dist=base_dist,
+        base_params=base_params, return_transform_only=return_transform_only,
         identity_gate=identity_gate,
     )
-    return flow, params
 
 
+# ====================================================================
+# Spline RealNVP builder
+# ====================================================================
 def build_spline_realnvp(
     key: PRNGKey,
     dim: int,
@@ -845,27 +884,10 @@ def build_spline_realnvp(
         bijection: Bijection object (transform + optional feature extractor).
         params: PyTree with keys "transform" and optionally "feature_extractor".
     """
-    if dim <= 0:
-        raise ValueError(f"build_spline_realnvp: dim must be positive, got {dim}.")
-    if num_layers <= 0:
-        raise ValueError(
-            f"build_spline_realnvp: num_layers must be positive, got {num_layers}."
-        )
-    if context_dim < 0:
-        raise ValueError(
-            f"build_spline_realnvp: context_dim must be non-negative, got {context_dim}."
-        )
-    if identity_gate is not None and use_permutation:
-        raise ValueError(
-            "build_spline_realnvp: identity_gate is incompatible with use_permutation=True. "
-            "Permutation cannot be smoothly interpolated to identity."
-        )
-    if identity_gate is not None and context_dim == 0:
-        raise ValueError(
-            "build_spline_realnvp: identity_gate requires context_dim > 0 "
-            "(gate function operates on context)."
-        )
-    validate_identity_gate(identity_gate, context_dim)
+    _validate_builder_args(
+        "build_spline_realnvp", dim, num_layers, context_dim,
+        identity_gate, use_permutation, context_extractor_hidden_dim,
+    )
     if num_bins <= 0:
         raise ValueError(
             f"build_spline_realnvp: num_bins must be positive, got {num_bins}."
@@ -881,104 +903,27 @@ def build_spline_realnvp(
             f"Got {min_bin_height} * {num_bins} = {min_bin_height * num_bins}."
         )
 
-    # Context feature extractor (optional)
-    if context_extractor_hidden_dim > 0 and context_dim == 0:
-        raise ValueError(
-            "build_spline_realnvp: context_extractor_hidden_dim > 0 requires context_dim > 0."
-        )
-    key, fe_key = jax.random.split(key)
-    feature_extractor, fe_params, effective_context_dim = _init_context_extractor(
-        fe_key, context_dim, context_extractor_hidden_dim, context_extractor_n_layers,
-        context_feature_dim, activation, res_scale,
-    )
-
-    # Base distribution (skip if only returning transform)
-    if not return_transform_only:
-        base, base_params_resolved = _resolve_base_distribution(
-            dim, trainable_base, base_dist, base_params
-        )
-
-    # --------------------------------------------------------------
-    # Transform: stack of spline couplings (and optional permutations)
-    # --------------------------------------------------------------
-    keys = jax.random.split(key, num_layers)
-
-    blocks = []
-    block_params = []
-
-    # Optional global linear layer at the beginning of the transform.
-    if use_linear:
-        key, lin_key = jax.random.split(key)
-        lin_block, lin_params = LinearTransform.create(lin_key, dim=dim)
-        blocks.append(lin_block)
-        block_params.append(lin_params)
-
-    parity = 0  # start with [1, 0, 1, 0, ...]
-    for layer_idx in range(num_layers):
-        mask = _make_alternating_mask(dim, parity)
-        parity = 1 - parity
-
-        coupling, coupling_params = SplineCoupling.create(
-            keys[layer_idx],
-            dim=dim,
-            mask=mask,
-            hidden_dim=hidden_dim,
-            n_hidden_layers=n_hidden_layers,
-            context_dim=effective_context_dim,
-            num_bins=num_bins,
-            tail_bound=tail_bound,
-            min_bin_width=min_bin_width,
-            min_bin_height=min_bin_height,
-            min_derivative=min_derivative,
-            max_derivative=max_derivative,
-            activation=activation,
+    def coupling_factory(layer_key, mask, effective_context_dim):
+        return SplineCoupling.create(
+            layer_key, dim=dim, mask=mask,
+            hidden_dim=hidden_dim, n_hidden_layers=n_hidden_layers,
+            context_dim=effective_context_dim, num_bins=num_bins,
+            tail_bound=tail_bound, min_bin_width=min_bin_width,
+            min_bin_height=min_bin_height, min_derivative=min_derivative,
+            max_derivative=max_derivative, activation=activation,
             res_scale=res_scale,
         )
-        blocks.append(coupling)
-        block_params.append(coupling_params)
 
-        if use_permutation and layer_idx != num_layers - 1:
-            perm = jnp.arange(dim - 1, -1, -1)
-            perm_block, perm_params = Permutation.create(keys[layer_idx], perm=perm)
-            blocks.append(perm_block)
-            block_params.append(perm_params)
-
-    # Optional final LOFT transform for tail stabilization
-    if use_loft:
-        key, loft_key = jax.random.split(key)
-        loft_block, loft_params = LoftTransform.create(loft_key, dim=dim, tau=loft_tau)
-        blocks.append(loft_block)
-        block_params.append(loft_params)
-
-    transform = CompositeTransform(blocks=blocks)
-
-    # Diagnostics: analyze mask coverage to make sure all dims are transformed.
-    # Issues can arise due to permutations canceling out masks.
-    analyze_mask_coverage(blocks, dim)
-
-    # Build params and return object based on return_transform_only
-    if return_transform_only:
-        params = {"transform": block_params}
-        if feature_extractor is not None:
-            params["feature_extractor"] = fe_params
-        bijection = Bijection(
-            transform=transform,
-            feature_extractor=feature_extractor,
-            identity_gate=identity_gate,
-        )
-        return bijection, params
-
-    params = {
-        "base": base_params_resolved,
-        "transform": block_params,
-    }
-    if feature_extractor is not None:
-        params["feature_extractor"] = fe_params
-
-    flow = Flow(
-        base_dist=base,
-        transform=transform,
-        feature_extractor=feature_extractor,
+    return _build_coupling_flow(
+        key, dim, num_layers, coupling_factory,
+        context_dim=context_dim,
+        context_extractor_hidden_dim=context_extractor_hidden_dim,
+        context_extractor_n_layers=context_extractor_n_layers,
+        context_feature_dim=context_feature_dim,
+        activation=activation, res_scale=res_scale,
+        use_permutation=use_permutation, use_linear=use_linear,
+        use_loft=use_loft, loft_tau=loft_tau,
+        trainable_base=trainable_base, base_dist=base_dist,
+        base_params=base_params, return_transform_only=return_transform_only,
         identity_gate=identity_gate,
     )
-    return flow, params

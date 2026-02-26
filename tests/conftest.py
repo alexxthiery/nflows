@@ -31,26 +31,6 @@ def batch_size():
     return 32
 
 
-def check_invertibility(forward_fn, inverse_fn, x, atol=1e-5):
-    """
-    Helper to verify forward(inverse(x)) ≈ x and log_det consistency.
-
-    Returns dict with errors for assertions.
-    """
-    z, ld_inv = inverse_fn(x)
-    x_rec, ld_fwd = forward_fn(z)
-
-    reconstruction_error = jnp.abs(x - x_rec).max()
-    logdet_error = jnp.abs(ld_fwd + ld_inv).max()
-
-    return {
-        "reconstruction_error": float(reconstruction_error),
-        "logdet_error": float(logdet_error),
-        "z": z,
-        "x_rec": x_rec,
-    }
-
-
 def check_logdet_vs_autodiff(forward_fn, x, atol=1e-4):
     """
     Compare log_det from forward pass against autodiff Jacobian.

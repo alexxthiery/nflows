@@ -1,14 +1,10 @@
-# nflows/nets.py
+# nflows/scalar_function.py
 from __future__ import annotations
-
-from typing import Callable, Sequence, Tuple
 
 import jax
 import jax.numpy as jnp
 
-
-Array = jnp.ndarray
-PRNGKey = jax.Array  # type alias for JAX random keys
+from .nets import Array
 
 
 def loft(z: Array, tau: float) -> Array:

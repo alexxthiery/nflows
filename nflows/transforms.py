@@ -62,8 +62,6 @@ def validate_identity_gate(identity_gate, context_dim: int) -> None:
     if identity_gate is None:
         return
 
-    import jax
-
     dtype = jnp.float32
 
     # --- Check 1: single sample must produce scalar ---
@@ -306,12 +304,7 @@ class LinearTransform:
         """
         # Gate the diagonal: s_gated = 1 + g * (s - 1)
         g_diag = g_value[:, None]  # (B, 1)
-        if s.ndim == 1:
-            # s is (dim,) - broadcast to (B, dim)
-            s_gated = 1.0 - g_diag + g_diag * s
-        else:
-            # s is already (B, dim)
-            s_gated = 1.0 - g_diag + g_diag * s
+        s_gated = 1.0 - g_diag + g_diag * s  # broadcasts for both (dim,) and (B, dim)
 
         dim = self.dim
         dtype = lower_raw.dtype
@@ -352,12 +345,7 @@ class LinearTransform:
         """
         # Gate the diagonal: s_gated = 1 + g * (s - 1)
         g_diag = g_value[:, None]  # (B, 1)
-        if s.ndim == 1:
-            # s is (dim,) - broadcast to (B, dim)
-            s_gated = 1.0 - g_diag + g_diag * s
-        else:
-            # s is already (B, dim)
-            s_gated = 1.0 - g_diag + g_diag * s
+        s_gated = 1.0 - g_diag + g_diag * s  # broadcasts for both (dim,) and (B, dim)
 
         dim = self.dim
         dtype = lower_raw.dtype
