@@ -314,6 +314,7 @@ def assemble_bijection(
     feature_extractor: Any = None,
     feature_extractor_params: Any = None,
     validate: bool = True,
+    identity_gate: Callable[[Array], Array] | None = None,
 ) -> Tuple[Bijection, Dict]:
     """
     Assemble a Bijection from a list of (transform, params) tuples.
@@ -400,7 +401,7 @@ def assemble_bijection(
     if feature_extractor is not None:
         params["feature_extractor"] = feature_extractor_params
 
-    bijection = Bijection(transform=transform, feature_extractor=feature_extractor)
+    bijection = Bijection(transform=transform, feature_extractor=feature_extractor, identity_gate=identity_gate)
     return bijection, params
 
 
@@ -411,6 +412,7 @@ def assemble_flow(
     feature_extractor: Any = None,
     feature_extractor_params: Any = None,
     validate: bool = True,
+    identity_gate: Callable[[Array], Array] | None = None,
 ) -> Tuple[Flow, Dict]:
     """
     Assemble a Flow from blocks, base distribution, and optional feature extractor.
@@ -504,7 +506,7 @@ def assemble_flow(
     if feature_extractor is not None:
         params["feature_extractor"] = feature_extractor_params
 
-    flow = Flow(base_dist=base, transform=transform, feature_extractor=feature_extractor)
+    flow = Flow(base_dist=base, transform=transform, feature_extractor=feature_extractor, identity_gate=identity_gate)
     return flow, params
 
 

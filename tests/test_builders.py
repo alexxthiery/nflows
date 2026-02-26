@@ -746,6 +746,30 @@ class TestAssembleBijection:
         bijection, params = assemble_bijection(blocks_and_params)
         assert isinstance(bijection, Bijection)
 
+    def test_identity_gate(self, key, dim):
+        """assemble_bijection passes identity_gate to Bijection."""
+        context_dim = 2
+        gate_fn = lambda ctx: ctx[0] * (1 - ctx[0])
+
+        keys = jax.random.split(key, 3)
+        mask0 = make_alternating_mask(dim, parity=0)
+        mask1 = make_alternating_mask(dim, parity=1)
+
+        blocks_and_params = [
+            AffineCoupling.create(keys[0], dim=dim, mask=mask0, hidden_dim=8, n_hidden_layers=1, context_dim=context_dim),
+            AffineCoupling.create(keys[1], dim=dim, mask=mask1, hidden_dim=8, n_hidden_layers=1, context_dim=context_dim),
+        ]
+
+        bijection, params = assemble_bijection(blocks_and_params, identity_gate=gate_fn)
+        assert bijection.identity_gate is gate_fn
+
+        # gate=0 at ctx[0]=0 -> identity
+        x = jax.random.normal(keys[2], (5, dim))
+        ctx = jnp.zeros((5, context_dim))
+        y, ld = bijection.forward(params, x, context=ctx)
+        assert jnp.allclose(y, x, atol=1e-6)
+        assert jnp.allclose(ld, 0.0, atol=1e-6)
+
 
 # ============================================================================
 # assemble_flow Tests
@@ -884,6 +908,32 @@ class TestAssembleFlow:
         log_prob = flow.log_prob(params, x, context=raw_ctx)
         assert log_prob.shape == (10,)
         assert not jnp.isnan(log_prob).any()
+
+    def test_identity_gate(self, key, dim):
+        """assemble_flow passes identity_gate to Flow."""
+        context_dim = 2
+        gate_fn = lambda ctx: ctx[0] * (1 - ctx[0])
+
+        keys = jax.random.split(key, 3)
+        mask0 = make_alternating_mask(dim, parity=0)
+        mask1 = make_alternating_mask(dim, parity=1)
+
+        blocks_and_params = [
+            AffineCoupling.create(keys[0], dim=dim, mask=mask0, hidden_dim=8, n_hidden_layers=1, context_dim=context_dim),
+            AffineCoupling.create(keys[1], dim=dim, mask=mask1, hidden_dim=8, n_hidden_layers=1, context_dim=context_dim),
+        ]
+
+        flow, params = assemble_flow(
+            blocks_and_params, base=StandardNormal(dim=dim), identity_gate=gate_fn,
+        )
+        assert flow.identity_gate is gate_fn
+
+        # gate=0 at ctx[0]=0 -> log_prob equals base log_prob (no transform)
+        x = jax.random.normal(keys[2], (5, dim))
+        ctx = jnp.zeros((5, context_dim))
+        lp = flow.log_prob(params, x, context=ctx)
+        base_lp = flow.base_dist.log_prob(params["base"], x)
+        assert jnp.allclose(lp, base_lp, atol=1e-6)
 
 
 # ============================================================================
