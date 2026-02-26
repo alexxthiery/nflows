@@ -884,3 +884,65 @@ class TestAssembleFlow:
         log_prob = flow.log_prob(params, x, context=raw_ctx)
         assert log_prob.shape == (10,)
         assert not jnp.isnan(log_prob).any()
+
+
+# ============================================================================
+# Default Consistency Tests
+# ============================================================================
+class TestDefaultConsistency:
+    """Verify builder defaults match .create() / dataclass defaults.
+
+    These tests exist to prevent silent drift between the two APIs.
+    If a default changes in one place, the test fails until both are aligned.
+    """
+
+    def _get_default(self, func, param_name):
+        """Extract the default value of a keyword argument from a callable."""
+        import inspect
+        sig = inspect.signature(func)
+        p = sig.parameters[param_name]
+        assert p.default is not inspect.Parameter.empty, (
+            f"{func.__qualname__} has no default for '{param_name}'"
+        )
+        return p.default
+
+    def test_max_log_scale_realnvp_vs_affine_create(self):
+        builder_val = self._get_default(build_realnvp, "max_log_scale")
+        create_val = self._get_default(AffineCoupling.create, "max_log_scale")
+        assert builder_val == create_val, (
+            f"max_log_scale mismatch: build_realnvp={builder_val}, "
+            f"AffineCoupling.create={create_val}"
+        )
+
+    def test_max_log_scale_affine_dataclass_vs_create(self):
+        from dataclasses import fields
+        dc_val = {f.name: f.default for f in fields(AffineCoupling)}["max_log_scale"]
+        create_val = self._get_default(AffineCoupling.create, "max_log_scale")
+        assert dc_val == create_val, (
+            f"max_log_scale mismatch: AffineCoupling dataclass={dc_val}, "
+            f"AffineCoupling.create={create_val}"
+        )
+
+    @pytest.mark.parametrize("param", [
+        "min_bin_width", "min_bin_height", "min_derivative",
+    ])
+    def test_spline_builder_vs_create(self, param):
+        builder_val = self._get_default(build_spline_realnvp, param)
+        create_val = self._get_default(SplineCoupling.create, param)
+        assert builder_val == create_val, (
+            f"{param} mismatch: build_spline_realnvp={builder_val}, "
+            f"SplineCoupling.create={create_val}"
+        )
+
+    @pytest.mark.parametrize("param", [
+        "min_bin_width", "min_bin_height", "min_derivative", "max_derivative",
+    ])
+    def test_spline_dataclass_vs_create(self, param):
+        from dataclasses import fields
+        dc_defaults = {f.name: f.default for f in fields(SplineCoupling)}
+        dc_val = dc_defaults[param]
+        create_val = self._get_default(SplineCoupling.create, param)
+        assert dc_val == create_val, (
+            f"{param} mismatch: SplineCoupling dataclass={dc_val}, "
+            f"SplineCoupling.create={create_val}"
+        )

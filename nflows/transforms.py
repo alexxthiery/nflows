@@ -609,7 +609,7 @@ class AffineCoupling:
     """
     mask: Array          # shape (dim,), values 0 or 1
     conditioner: MLP     # Flax MLP module (definition, no params inside)
-    max_log_scale: float = 1.0
+    max_log_scale: float = 5.0
     max_shift: float | None = None  # Default: exp(max_log_scale)
 
     def __post_init__(self):
@@ -654,7 +654,7 @@ class AffineCoupling:
         context_dim: int = 0,
         activation: Callable[[Array], Array] = nn.elu,
         res_scale: float = 0.1,
-        max_log_scale: float = 1.0,
+        max_log_scale: float = 5.0,
         max_shift: float | None = None,
     ) -> Tuple["AffineCoupling", dict]:
         """
@@ -672,7 +672,7 @@ class AffineCoupling:
             context_dim: Context dimension (0 for unconditional).
             activation: Activation function for MLP (default: elu).
             res_scale: Residual connection scale (default: 0.1).
-            max_log_scale: Bound on |log_scale| via tanh (default: 1.0).
+            max_log_scale: Bound on |log_scale| via tanh (default: 5.0).
             max_shift: Bound on |shift| via tanh (default: exp(max_log_scale)).
 
         Returns:
@@ -947,9 +947,9 @@ class SplineCoupling:
     conditioner: Any            # Flax module, called via conditioner.apply
     num_bins: int = 8
     tail_bound: float = 5.0
-    min_bin_width: float = 1e-3
-    min_bin_height: float = 1e-3
-    min_derivative: float = 1e-3
+    min_bin_width: float = 1e-2
+    min_bin_height: float = 1e-2
+    min_derivative: float = 1e-2
     max_derivative: float = 10.0
 
     def __post_init__(self):
@@ -1009,9 +1009,9 @@ class SplineCoupling:
         context_dim: int = 0,
         num_bins: int = 8,
         tail_bound: float = 5.0,
-        min_bin_width: float = 1e-3,
-        min_bin_height: float = 1e-3,
-        min_derivative: float = 1e-3,
+        min_bin_width: float = 1e-2,
+        min_bin_height: float = 1e-2,
+        min_derivative: float = 1e-2,
         max_derivative: float = 10.0,
         activation: Callable[[Array], Array] = nn.elu,
         res_scale: float = 0.1,
@@ -1031,9 +1031,9 @@ class SplineCoupling:
             context_dim: Context dimension (0 for unconditional).
             num_bins: Number of spline bins (default: 8).
             tail_bound: Spline acts on [-B, B]; identity outside (default: 5.0).
-            min_bin_width: Minimum bin width for stability (default: 1e-3).
-            min_bin_height: Minimum bin height for stability (default: 1e-3).
-            min_derivative: Minimum derivative for stability (default: 1e-3).
+            min_bin_width: Minimum bin width for stability (default: 1e-2).
+            min_bin_height: Minimum bin height for stability (default: 1e-2).
+            min_derivative: Minimum derivative for stability (default: 1e-2).
             max_derivative: Maximum derivative for stability (default: 10.0).
             activation: Activation function for MLP (default: elu).
             res_scale: Residual connection scale (default: 0.1).
