@@ -8,7 +8,7 @@ import jax.numpy as jnp
 
 from .nets import init_resnet, Array, PRNGKey
 from .distributions import StandardNormal, DiagNormal
-from .transforms import AffineCoupling, Permutation, CompositeTransform, LinearTransform, LoftTransform, SplineCoupling
+from .transforms import AffineCoupling, Permutation, CompositeTransform, LinearTransform, LoftTransform, SplineCoupling, validate_identity_gate
 from .flows import Bijection, Flow
 
 
@@ -630,6 +630,7 @@ def build_realnvp(
             "build_realnvp: identity_gate requires context_dim > 0 "
             "(gate function operates on context)."
         )
+    validate_identity_gate(identity_gate, context_dim)
 
     # Context feature extractor (optional)
     if context_extractor_hidden_dim > 0 and context_dim == 0:
@@ -864,6 +865,7 @@ def build_spline_realnvp(
             "build_spline_realnvp: identity_gate requires context_dim > 0 "
             "(gate function operates on context)."
         )
+    validate_identity_gate(identity_gate, context_dim)
     if num_bins <= 0:
         raise ValueError(
             f"build_spline_realnvp: num_bins must be positive, got {num_bins}."

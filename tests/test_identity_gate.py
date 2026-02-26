@@ -11,9 +11,121 @@ from nflows.transforms import (
     LoftTransform,
     CompositeTransform,
     _compute_gate_value,
+    validate_identity_gate,
 )
 from nflows.builders import build_realnvp, build_spline_realnvp, make_alternating_mask
 from nflows.distributions import StandardNormal
+
+
+# ============================================================================
+# validate_identity_gate tests
+# ============================================================================
+class TestValidateIdentityGate:
+    """Tests for the build-time shape check that catches batch-aware gates.
+
+    A correct gate operates on a single context vector (context_dim,) and
+    returns a scalar. validate_identity_gate uses jax.eval_shape (zero cost,
+    no actual computation) to detect gates that silently reduce over the
+    batch dimension, which would produce wrong values under jax.vmap.
+    """
+
+    def test_none_gate_is_noop(self):
+        """None gate skips validation without error."""
+        validate_identity_gate(None, context_dim=4)
+
+    def test_correct_single_sample_gate_passes(self):
+        """Standard per-sample gate: context -> scalar.
+
+        Uses axis=-1 explicitly so the function is unambiguous about
+        which dimension it reduces. jnp.sum(ctx ** 2) without axis
+        would also work under vmap, but is flagged by the validator
+        because it reduces all dims on 2D input (see test below).
+        """
+        gate = lambda ctx: jnp.sum(ctx ** 2, axis=-1)
+        validate_identity_gate(gate, context_dim=4)
+
+    def test_correct_gate_using_index(self):
+        """Gate that indexes a single feature."""
+        gate = lambda ctx: jnp.sin(jnp.pi * ctx[0])
+        validate_identity_gate(gate, context_dim=3)
+
+    def test_batch_reducing_gate_raises(self):
+        """Gate that reduces over axis 0 (batch dim) should be caught.
+
+        This gate computes mean(axis=0).sum(), which on a single sample
+        (context_dim,) takes the feature mean, but on (batch, context_dim)
+        averages over the batch. Both return scalar, so the shape check
+        detects the mismatch.
+        """
+        bad_gate = lambda ctx: ctx.mean(axis=0).sum()
+        with pytest.raises(ValueError, match="reduce over"):
+            validate_identity_gate(bad_gate, context_dim=4)
+
+    def test_axis_free_reduction_flagged(self):
+        """jnp.sum without axis is flagged as ambiguous.
+
+        jnp.sum(ctx) on (context_dim,) and (2, context_dim) both return
+        scalar. The validator can't distinguish this from a batch-reducing
+        gate, so it flags it. The fix is to write jnp.sum(ctx, axis=-1),
+        which is identical on 1-D input but returns (2,) on 2-D.
+        """
+        ambiguous_gate = lambda ctx: jnp.sum(ctx)
+        with pytest.raises(ValueError, match="reduce over"):
+            validate_identity_gate(ambiguous_gate, context_dim=4)
+
+    def test_gate_that_works_on_both_ranks_passes(self):
+        """Gate that broadcasts naturally across batch is fine.
+
+        jnp.sum(ctx, axis=-1) on (context_dim,) returns scalar.
+        jnp.sum(ctx, axis=-1) on (2, context_dim) returns (2,).
+        This is correct: it handles both ranks without reducing batch.
+        """
+        gate = lambda ctx: jnp.sum(ctx, axis=-1)
+        validate_identity_gate(gate, context_dim=4)
+
+    def test_gate_errors_on_2d_input_passes(self):
+        """Gate that fails on 2D input is correct (single-sample only).
+
+        A gate using ctx[0] * ctx[1] only works on 1-D vectors.
+        On (2, context_dim) input, ctx[0] and ctx[1] are rows, and
+        multiplying rows gives (context_dim,), not scalar. The shape
+        check for single-sample output would fail, but the function
+        errors during tracing first, which is fine.
+        """
+        gate = lambda ctx: ctx[0] * ctx[1]
+        # This should not raise (errors on 2D are acceptable)
+        validate_identity_gate(gate, context_dim=4)
+
+    def test_nonscalar_output_raises(self):
+        """Gate returning non-scalar on single sample should raise."""
+        bad_gate = lambda ctx: ctx  # returns (context_dim,), not scalar
+        with pytest.raises(ValueError, match="must return a scalar"):
+            validate_identity_gate(bad_gate, context_dim=4)
+
+    def test_context_dim_1(self):
+        """Works with context_dim=1."""
+        gate = lambda ctx: ctx[0]
+        validate_identity_gate(gate, context_dim=1)
+
+    def test_builder_catches_bad_gate(self, key):
+        """build_realnvp rejects a batch-reducing gate at build time."""
+        bad_gate = lambda ctx: ctx.mean(axis=0).sum()
+        with pytest.raises(ValueError, match="reduce over"):
+            build_realnvp(
+                key=key, dim=4, context_dim=2,
+                num_layers=1, hidden_dim=8, n_hidden_layers=1,
+                identity_gate=bad_gate,
+            )
+
+    def test_spline_builder_catches_bad_gate(self, key):
+        """build_spline_realnvp rejects a batch-reducing gate at build time."""
+        bad_gate = lambda ctx: ctx.mean(axis=0).sum()
+        with pytest.raises(ValueError, match="reduce over"):
+            build_spline_realnvp(
+                key=key, dim=4, context_dim=2,
+                num_layers=1, hidden_dim=8, n_hidden_layers=1,
+                identity_gate=bad_gate,
+            )
 
 
 # ============================================================================

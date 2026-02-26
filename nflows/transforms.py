@@ -15,6 +15,111 @@ import nflows.scalar_function as scalar_function
 from .splines import rational_quadratic_spline
 
 
+def validate_identity_gate(identity_gate, context_dim: int) -> None:
+    """
+    Check that an identity_gate function is written for single samples.
+
+    WHY THIS CHECK EXISTS
+    ---------------------
+    _compute_gate_value applies the gate via jax.vmap, which maps over the
+    leading (batch) axis and calls the gate once per sample with shape
+    (context_dim,). If a user writes a gate that *expects* batched input
+    (batch, context_dim), vmap silently feeds it a 1-D vector instead. The
+    gate still runs, but it interprets axis 0 as features rather than
+    samples, producing wrong scalar values with no error.
+
+    HOW THE CHECK WORKS
+    -------------------
+    We use jax.eval_shape to trace the gate on two abstract inputs, without
+    doing any actual computation (zero FLOPs):
+
+      1. Single sample:  shape (context_dim,)   -> must produce shape ()
+      2. Fake batch:     shape (2, context_dim)  -> tells us how the gate
+         responds to a rank-2 input.
+
+    A correct per-sample gate either:
+      (a) errors on the rank-2 input (it was written for 1-D only), or
+      (b) returns shape (2,), meaning it naturally broadcasts across batch.
+
+    A batch-reducing gate returns shape () for both inputs, which is the
+    red flag: it collapses the leading axis, treating it as batch.
+
+    WHEN TO CALL
+    ------------
+    Called at build time (before jit), so tracing costs are negligible.
+    The high-level builders (build_realnvp, build_spline_realnvp) call this
+    automatically. If using the lower-level assemble_* API, call this
+    explicitly since those functions don't know context_dim.
+
+    Arguments:
+        identity_gate: Callable mapping a single context vector -> scalar.
+        context_dim:   Dimensionality of the raw context vector.
+
+    Raises:
+        ValueError: If the gate's output shape is inconsistent with
+                    single-sample usage.
+    """
+    if identity_gate is None:
+        return
+
+    import jax
+
+    dtype = jnp.float32
+
+    # --- Check 1: single sample must produce scalar ---
+    single_shape = jax.ShapeDtypeStruct((context_dim,), dtype)
+    try:
+        out_single = jax.eval_shape(identity_gate, single_shape)
+    except Exception as e:
+        raise ValueError(
+            f"identity_gate failed on single-sample input of shape "
+            f"({context_dim},): {e}"
+        ) from e
+
+    if out_single.shape != ():
+        raise ValueError(
+            f"identity_gate must return a scalar for a single context vector "
+            f"of shape ({context_dim},), but returned shape {out_single.shape}."
+        )
+
+    # --- Check 2: rank-2 input distinguishes per-sample vs batch-reducing ---
+    #
+    # We trace the gate on shape (2, context_dim). Three outcomes:
+    #
+    #   - Exception:  gate only accepts 1-D input. This is correct usage;
+    #                 vmap will handle batching.
+    #
+    #   - Shape (2,): gate naturally maps across the leading axis, returning
+    #                 one scalar per row. Compatible with vmap (both give
+    #                 the same result).
+    #
+    #   - Shape ():   gate collapses the leading axis, treating it as the
+    #                 batch dimension. Under vmap it receives (context_dim,)
+    #                 and still returns (), but the *values* will be wrong
+    #                 because it operates on features instead of samples.
+    #                 This is the failure mode we want to catch.
+    batch_shape = jax.ShapeDtypeStruct((2, context_dim), dtype)
+    try:
+        out_batch = jax.eval_shape(identity_gate, batch_shape)
+    except Exception:
+        # Gate errors on 2-D input: it was written for single samples. Good.
+        return
+
+    if out_batch.shape == ():
+        raise ValueError(
+            "identity_gate appears to reduce over the input's leading axis: "
+            f"it returns shape () for both input shapes ({context_dim},) and "
+            f"(2, {context_dim}). This means it treats axis 0 as a batch "
+            "dimension. Under jax.vmap (used internally), the gate receives "
+            "one sample at a time with shape (context_dim,), so a "
+            "batch-reducing gate silently produces wrong values. "
+            "Rewrite the gate to operate on a single vector of shape "
+            f"({context_dim},) and return a scalar."
+        )
+
+    # Any other shape (e.g. (2,)) is acceptable.
+
+
 def _compute_gate_value(identity_gate, context):
     """
     Compute gate value from context, handling batching via vmap.
