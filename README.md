@@ -135,6 +135,8 @@ flow, params = build_realnvp(
 # At t=0.5: gate=0.25 → learned transform (scaled by gate)
 ```
 
+The gate function always receives **raw context**, even when a feature extractor is used. Coupling layers see extracted features, but the gate does not. This is by design: the gate encodes known structure (e.g. boundary conditions), so it operates on interpretable inputs. The gate function must be written for a single sample; batching is handled internally via `jax.vmap`.
+
 Use cases: boundary conditions, time-dependent flows where endpoints must be identity.
 
 ## Architecture

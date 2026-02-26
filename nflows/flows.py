@@ -41,6 +41,16 @@ class Bijection:
       When gate=1, the transform acts normally. This enables smooth interpolation
       between identity and the learned transform based on context.
 
+      The gate always receives RAW context, even when a feature_extractor is used.
+      Coupling layers see extracted features, but the gate does not. This is
+      intentional: the gate typically encodes known structure (e.g. boundary
+      conditions at specific parameter values), so it should operate on
+      interpretable raw inputs rather than a learned representation that changes
+      during training.
+
+      The gate function must be written for a single sample (shape (context_dim,)).
+      Batched inputs are handled internally via jax.vmap.
+
       Example: identity_gate = lambda ctx: jnp.sin(jnp.pi * ctx[0])
       This gives identity at ctx[0]=0 and ctx[0]=1, and full transform at ctx[0]=0.5.
     """
@@ -139,8 +149,15 @@ class Flow:
       When gate=1, the transform acts normally. This enables smooth interpolation
       between identity and the learned transform based on context.
 
-      The gate is computed from RAW context (before feature extraction), allowing
-      the gate function to operate on the original context values.
+      The gate always receives RAW context, even when a feature_extractor is used.
+      Coupling layers see extracted features, but the gate does not. This is
+      intentional: the gate typically encodes known structure (e.g. boundary
+      conditions at specific parameter values), so it should operate on
+      interpretable raw inputs rather than a learned representation that changes
+      during training.
+
+      The gate function must be written for a single sample (shape (context_dim,)).
+      Batched inputs are handled internally via jax.vmap.
 
       Example: identity_gate = lambda ctx: jnp.sin(jnp.pi * ctx[0])
       This gives identity at ctx[0]=0 and ctx[0]=1, and full transform at ctx[0]=0.5.

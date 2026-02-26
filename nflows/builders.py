@@ -593,8 +593,11 @@ def build_realnvp(
                    invertible map with tractable Jacobian, without a base distribution.
       identity_gate: Optional callable that maps context -> scalar gate value.
                    When gate=0, transform is identity (y=x, log_det=0). When gate=1,
-                   transform acts normally. Incompatible with use_permutation=True
-                   because permutations cannot be smoothly interpolated to identity.
+                   transform acts normally. Receives RAW context, not extracted
+                   features (even when context_extractor_hidden_dim > 0). Must be
+                   written for a single sample; batching is handled via jax.vmap.
+                   Incompatible with use_permutation=True because permutations
+                   cannot be smoothly interpolated to identity.
                    Example: identity_gate = lambda ctx: jnp.sin(jnp.pi * ctx[0])
 
     Returns:
@@ -824,8 +827,11 @@ def build_spline_realnvp(
                    invertible map with tractable Jacobian, without a base distribution.
       identity_gate: Optional callable that maps context -> scalar gate value.
                    When gate=0, transform is identity (y=x, log_det=0). When gate=1,
-                   transform acts normally. Incompatible with use_permutation=True
-                   because permutations cannot be smoothly interpolated to identity.
+                   transform acts normally. Receives RAW context, not extracted
+                   features (even when context_extractor_hidden_dim > 0). Must be
+                   written for a single sample; batching is handled via jax.vmap.
+                   Incompatible with use_permutation=True because permutations
+                   cannot be smoothly interpolated to identity.
                    Example: identity_gate = lambda ctx: jnp.sin(jnp.pi * ctx[0])
 
     Returns:

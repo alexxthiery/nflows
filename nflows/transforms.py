@@ -22,9 +22,13 @@ def _compute_gate_value(identity_gate, context):
     When identity_gate(context) = 0, the transform should be the identity.
     When identity_gate(context) = 1, the transform acts normally.
 
+    This function is called with RAW context (before feature extraction).
+    The gate function must be written for a single sample of shape
+    (context_dim,); batched inputs are handled via jax.vmap.
+
     Arguments:
-        identity_gate: Callable that maps context -> scalar, or None.
-        context: Context tensor of shape (context_dim,) or (batch, context_dim), or None.
+        identity_gate: Callable that maps a single context vector -> scalar, or None.
+        context: Raw context tensor of shape (context_dim,) or (batch, context_dim), or None.
 
     Returns:
         Gate value array of shape () or (batch,), or None if identity_gate is None.
