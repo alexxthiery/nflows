@@ -15,6 +15,7 @@ from nflows.transforms import (
     LoftTransform,
 )
 from nflows.nets import init_mlp
+from conftest import check_logdet_vs_autodiff
 
 
 # ============================================================================
@@ -1113,3 +1114,186 @@ class TestLoftTransformFactory:
         """create raises ValueError for tau <= 0."""
         with pytest.raises(ValueError, match="tau must be positive"):
             LoftTransform.create(key, dim=dim, tau=0.0)
+
+
+# ============================================================================
+# LOFT overflow regression tests (C1)
+# ============================================================================
+class TestLoftOverflow:
+    """Regression tests for LOFT inverse overflow with large inputs."""
+
+    def test_loft_inv_large_input_finite(self):
+        """loft_inv must return finite values for |y| >> tau."""
+        from nflows.scalar_function import loft_inv
+        y = jnp.array([2000.0, -2000.0, 1100.0, -1100.0])
+        x = loft_inv(y, tau=1000.0)
+        assert jnp.all(jnp.isfinite(x)), f"loft_inv produced non-finite: {x}"
+
+    def test_loft_roundtrip_large_z(self):
+        """loft(loft_inv(y)) should roundtrip for y within recoverable range.
+
+        The clamp at 80 means exact roundtrip works for |y| <= tau + 80.
+        Values beyond that saturate but remain finite.
+        """
+        from nflows.scalar_function import loft, loft_inv
+        # Values within recoverable range (tau=1000, max exact = 1080)
+        y = jnp.array([1050.0, -1050.0, 1079.0, -1079.0])
+        x = loft_inv(y, tau=1000.0)
+        y_rec = loft(x, tau=1000.0)
+        assert jnp.all(jnp.isfinite(x)), f"loft_inv produced non-finite: {x}"
+        assert jnp.allclose(y_rec, y, atol=1e-3), (
+            f"roundtrip failed: max err={jnp.max(jnp.abs(y_rec - y))}"
+        )
+
+    def test_loft_inv_beyond_clamp_saturates_finitely(self):
+        """Values beyond tau+80 saturate but remain finite (no inf/nan)."""
+        from nflows.scalar_function import loft_inv
+        y = jnp.array([1200.0, -1200.0, 5000.0, -5000.0])
+        x = loft_inv(y, tau=1000.0)
+        assert jnp.all(jnp.isfinite(x)), f"loft_inv produced non-finite: {x}"
+
+    def test_loft_transform_inverse_large(self, key):
+        """LoftTransform.inverse must handle large values without overflow."""
+        dim = 4
+        transform, params = LoftTransform.create(key, dim=dim, tau=1000.0)
+        y = jnp.full((5, dim), 2000.0)
+        x, log_det = transform.inverse(params, y)
+        assert jnp.all(jnp.isfinite(x)), f"inverse produced non-finite x: {x}"
+        assert jnp.all(jnp.isfinite(log_det)), f"inverse produced non-finite log_det: {log_det}"
+
+
+# ============================================================================
+# Log-det vs autodiff correctness tests (C3)
+# ============================================================================
+class TestLogdetVsAutodiff:
+    """Verify hand-derived log-det formulas match autodiff Jacobian.
+
+    Uses check_logdet_vs_autodiff from conftest.py on single samples (no batch).
+    """
+
+    def test_affine_coupling(self):
+        """AffineCoupling log-det matches autodiff."""
+
+        key = jax.random.PRNGKey(0)
+        dim = 4
+        mask = jnp.array([1, 0, 1, 0], dtype=jnp.float32)
+        coupling, params = AffineCoupling.create(
+            key, dim=dim, mask=mask, hidden_dim=16, n_hidden_layers=1
+        )
+        x = jax.random.normal(jax.random.PRNGKey(1), (dim,))
+        result = check_logdet_vs_autodiff(
+            lambda z: coupling.forward(params, z), x
+        )
+        assert result["error"] < 1e-4, (
+            f"AffineCoupling log-det error: {result['error']}"
+        )
+
+    def test_affine_coupling_conditional(self):
+        """AffineCoupling with context: log-det matches autodiff."""
+
+        key = jax.random.PRNGKey(0)
+        dim = 4
+        mask = jnp.array([1, 0, 1, 0], dtype=jnp.float32)
+        coupling, params = AffineCoupling.create(
+            key, dim=dim, mask=mask, hidden_dim=16, n_hidden_layers=1,
+            context_dim=2
+        )
+        x = jax.random.normal(jax.random.PRNGKey(1), (dim,))
+        ctx = jax.random.normal(jax.random.PRNGKey(2), (2,))
+        result = check_logdet_vs_autodiff(
+            lambda z: coupling.forward(params, z, ctx), x
+        )
+        assert result["error"] < 1e-4, (
+            f"AffineCoupling conditional log-det error: {result['error']}"
+        )
+
+    def test_spline_coupling(self):
+        """SplineCoupling log-det matches autodiff."""
+
+        key = jax.random.PRNGKey(0)
+        dim = 4
+        mask = jnp.array([1, 0, 1, 0], dtype=jnp.float32)
+        coupling, params = SplineCoupling.create(
+            key, dim=dim, mask=mask, hidden_dim=16, n_hidden_layers=1,
+            num_bins=8
+        )
+        x = jax.random.normal(jax.random.PRNGKey(1), (dim,)) * 0.5
+        result = check_logdet_vs_autodiff(
+            lambda z: coupling.forward(params, z), x
+        )
+        assert result["error"] < 1e-3, (
+            f"SplineCoupling log-det error: {result['error']}"
+        )
+
+    def test_linear_transform(self):
+        """LinearTransform log-det matches autodiff."""
+
+        key = jax.random.PRNGKey(0)
+        dim = 4
+        transform, _ = LinearTransform.create(key, dim=dim)
+        params = {
+            "lower": jax.random.normal(key, (dim, dim)) * 0.1,
+            "upper": jax.random.normal(jax.random.PRNGKey(1), (dim, dim)) * 0.1,
+            "raw_diag": jax.random.normal(jax.random.PRNGKey(2), (dim,)) * 0.5,
+        }
+        x = jax.random.normal(jax.random.PRNGKey(3), (dim,))
+        result = check_logdet_vs_autodiff(
+            lambda z: transform.forward(params, z), x
+        )
+        assert result["error"] < 1e-4, (
+            f"LinearTransform log-det error: {result['error']}"
+        )
+
+    def test_loft_transform(self):
+        """LoftTransform log-det matches autodiff."""
+
+        key = jax.random.PRNGKey(0)
+        dim = 4
+        transform, params = LoftTransform.create(key, dim=dim, tau=5.0)
+        x = jax.random.normal(jax.random.PRNGKey(1), (dim,)) * 3.0
+        result = check_logdet_vs_autodiff(
+            lambda z: transform.forward(params, z), x
+        )
+        assert result["error"] < 1e-4, (
+            f"LoftTransform log-det error: {result['error']}"
+        )
+
+    def test_permutation(self):
+        """Permutation log-det is zero (matches autodiff)."""
+
+        dim = 4
+        perm = jnp.array([2, 0, 3, 1])
+        transform, params = Permutation.create(jax.random.PRNGKey(0), perm=perm)
+        x = jax.random.normal(jax.random.PRNGKey(1), (dim,))
+        result = check_logdet_vs_autodiff(
+            lambda z: transform.forward(params, z), x
+        )
+        assert result["error"] < 1e-6, (
+            f"Permutation log-det error: {result['error']}"
+        )
+
+    def test_composite_transform(self):
+        """CompositeTransform (affine + linear) log-det matches autodiff."""
+
+        key = jax.random.PRNGKey(0)
+        dim = 4
+        mask = jnp.array([1, 0, 1, 0], dtype=jnp.float32)
+        k1, k2 = jax.random.split(key)
+        coupling, c_params = AffineCoupling.create(
+            k1, dim=dim, mask=mask, hidden_dim=16, n_hidden_layers=1
+        )
+        linear, _ = LinearTransform.create(k2, dim=dim)
+        l_params = {
+            "lower": jax.random.normal(k2, (dim, dim)) * 0.1,
+            "upper": jax.random.normal(jax.random.PRNGKey(10), (dim, dim)) * 0.1,
+            "raw_diag": jax.random.normal(jax.random.PRNGKey(11), (dim,)) * 0.3,
+        }
+        composite = CompositeTransform(blocks=[coupling, linear])
+        all_params = [c_params, l_params]
+        x = jax.random.normal(jax.random.PRNGKey(1), (dim,))
+        result = check_logdet_vs_autodiff(
+            lambda z: composite.forward(all_params, z), x
+        )
+        assert result["error"] < 1e-3, (
+            f"CompositeTransform log-det error: {result['error']}"
+        )

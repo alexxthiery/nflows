@@ -67,6 +67,9 @@ def loft_inv(y: Array, tau: float) -> Array:
     core = jnp.minimum(abs_y, tau)
     tail = jnp.maximum(abs_y - tau, 0.0)
 
+    # Clamp tail to prevent float32 overflow in expm1 (overflows at ~88.7).
+    tail = jnp.minimum(tail, 80.0)
+
     # expm1 for numerical stability when tail is small
     return sign_y * (core + jnp.expm1(tail))
 

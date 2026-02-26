@@ -8,6 +8,7 @@ from nflows.transforms import (
     AffineCoupling,
     SplineCoupling,
     LinearTransform,
+    LoftTransform,
     CompositeTransform,
     _compute_gate_value,
 )
@@ -484,6 +485,127 @@ class TestBijectionIdentityGate:
         y, _ = bijection.forward(params, x, context=ctx_half)
         x_rec, _ = bijection.inverse(params, y, context=ctx_half)
         assert jnp.allclose(x_rec, x, atol=1e-4)
+
+
+# ============================================================================
+# LoftTransform gate tests (C2)
+# ============================================================================
+class TestLoftTransformGate:
+    """Tests for LoftTransform with identity gate (g_value parameter)."""
+
+    @pytest.fixture
+    def transform_and_params(self):
+        """Create LoftTransform with non-trivial tau."""
+        key = jax.random.PRNGKey(42)
+        dim = 4
+        transform, params = LoftTransform.create(key, dim=dim, tau=5.0)
+        return transform, params, dim
+
+    def test_gate_zero_gives_identity(self, transform_and_params):
+        """When g_value=0, LoftTransform forward returns identity."""
+        transform, params, dim = transform_and_params
+        x = jax.random.normal(jax.random.PRNGKey(0), (10, dim))
+        g_value = jnp.zeros(10)
+
+        y, log_det = transform.forward(params, x, g_value=g_value)
+
+        assert jnp.allclose(y, x, atol=1e-6), (
+            f"y should equal x when g=0, max diff: {jnp.max(jnp.abs(y - x))}"
+        )
+        assert jnp.allclose(log_det, 0.0, atol=1e-6), (
+            f"log_det should be 0 when g=0, got: {log_det}"
+        )
+
+    def test_gate_one_gives_normal_transform(self, transform_and_params):
+        """When g_value=1, LoftTransform forward matches ungated."""
+        transform, params, dim = transform_and_params
+        x = jax.random.normal(jax.random.PRNGKey(0), (10, dim))
+
+        y_ungated, ld_ungated = transform.forward(params, x)
+        g_value = jnp.ones(10)
+        y_gated, ld_gated = transform.forward(params, x, g_value=g_value)
+
+        assert jnp.allclose(y_gated, y_ungated, atol=1e-5)
+        assert jnp.allclose(ld_gated, ld_ungated, atol=1e-5)
+
+    def test_gate_invertibility(self, transform_and_params):
+        """forward(inverse(y)) roundtrips with intermediate gate value."""
+        transform, params, dim = transform_and_params
+        x = jax.random.normal(jax.random.PRNGKey(0), (10, dim))
+        g_value = jnp.ones(10) * 0.7
+
+        y, _ = transform.forward(params, x, g_value=g_value)
+        x_rec, _ = transform.inverse(params, y, g_value=g_value)
+
+        assert jnp.allclose(x_rec, x, atol=1e-4), (
+            f"roundtrip failed, max err: {jnp.max(jnp.abs(x_rec - x))}"
+        )
+
+    def test_gate_interpolation(self, transform_and_params):
+        """g=0.5 should produce output between identity and full LOFT."""
+        transform, params, dim = transform_and_params
+        x = jax.random.normal(jax.random.PRNGKey(0), (10, dim)) * 3.0
+        g_value = jnp.ones(10) * 0.5
+
+        y_gated, _ = transform.forward(params, x, g_value=g_value)
+        y_full, _ = transform.forward(params, x)
+
+        # y_gated should be between x and y_full (element-wise)
+        diff_gated = jnp.abs(y_gated - x)
+        diff_full = jnp.abs(y_full - x)
+        assert jnp.all(diff_gated <= diff_full + 1e-5), (
+            "g=0.5 output should be closer to identity than g=1"
+        )
+
+
+class TestBuildRealNVPIdentityGateWithLoft:
+    """Tests for build_realnvp with identity_gate AND use_loft=True (C2)."""
+
+    def test_identity_gate_loft_at_zero(self):
+        """Flow with identity_gate + use_loft=True gives identity at gate=0.
+
+        Uses loft_tau=0.1 so LOFT is strongly non-linear for normal inputs,
+        exposing the bug where LOFT ignores g_value.
+        """
+        key = jax.random.PRNGKey(42)
+        gate_fn = lambda ctx: jnp.sin(jnp.pi * ctx[0])
+
+        flow, params = build_realnvp(
+            key, dim=4, num_layers=4, hidden_dim=32, n_hidden_layers=1,
+            context_dim=1, identity_gate=gate_fn, use_loft=True, loft_tau=0.1
+        )
+
+        x = jax.random.normal(jax.random.PRNGKey(0), (50, 4))
+        ctx_0 = jnp.zeros((50, 1))  # gate = sin(0) = 0
+
+        y, log_det = flow.forward(params, x, context=ctx_0)
+
+        assert jnp.allclose(y, x, atol=1e-5), (
+            f"y should equal x when gate=0 with LOFT, max diff: {jnp.max(jnp.abs(y - x))}"
+        )
+        assert jnp.allclose(log_det, 0.0, atol=1e-5), (
+            f"log_det should be 0 when gate=0 with LOFT, got max: {jnp.max(jnp.abs(log_det))}"
+        )
+
+    def test_identity_gate_loft_invertibility(self):
+        """Flow with identity_gate + use_loft=True is invertible at gate=0.7."""
+        key = jax.random.PRNGKey(42)
+        gate_fn = lambda ctx: ctx[0]
+
+        flow, params = build_realnvp(
+            key, dim=4, num_layers=4, hidden_dim=32, n_hidden_layers=1,
+            context_dim=1, identity_gate=gate_fn, use_loft=True, loft_tau=0.1
+        )
+
+        x = jax.random.normal(jax.random.PRNGKey(0), (50, 4))
+        ctx = jnp.ones((50, 1)) * 0.7
+
+        y, _ = flow.forward(params, x, context=ctx)
+        x_rec, _ = flow.inverse(params, y, context=ctx)
+
+        assert jnp.allclose(x_rec, x, atol=1e-4), (
+            f"roundtrip failed, max err: {jnp.max(jnp.abs(x_rec - x))}"
+        )
 
 
 class TestSampleAndLogProbWithGate:
