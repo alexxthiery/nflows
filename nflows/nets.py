@@ -194,6 +194,13 @@ class MLP(nn.Module):
                 f"MLP expected x with last dimension {self.x_dim}, got {x.shape[-1]}."
             )
 
+        # Reject context when context_dim=0 (silent misconfiguration).
+        if context is not None and self.context_dim == 0:
+            raise ValueError(
+                "context was passed but context_dim=0. "
+                "Set context_dim to match your context features."
+            )
+
         # Context handling.
         if context is not None and self.context_dim > 0:
             # Check context feature dimension.
