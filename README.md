@@ -36,6 +36,7 @@ samples, log_prob = flow.sample_and_log_prob(params, key, shape=(1000,))
 
 ## Features
 
+- [Affine flow (RealNVP)](USAGE.md#affine-flow-realnvp) with affine coupling layers
 - [Spline flows](USAGE.md#spline-flows) for more expressive transforms
 - [Conditional flows](USAGE.md#conditional-flows) with context variables
 - [Feature extractor](USAGE.md#feature-extractor) for high-dimensional context

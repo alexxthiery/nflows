@@ -5,7 +5,7 @@ For API details, see [REFERENCE.md](REFERENCE.md). For math, see [INTERNALS.md](
 
 **Contents:**
 
-- [Unconditional Flow](#unconditional-flow)
+- [Affine Flow (RealNVP)](#affine-flow-realnvp)
 - [Spline Flows](#spline-flows)
 - [Conditional Flows](#conditional-flows)
 - [Feature Extractor](#feature-extractor)
@@ -15,9 +15,9 @@ For API details, see [REFERENCE.md](REFERENCE.md). For math, see [INTERNALS.md](
 - [Assembly with Context](#assembly-with-context-and-feature-extractor)
 - [Training](#training)
 
-## Unconditional Flow
+## Affine Flow (RealNVP)
 
-Build a flow, draw samples, evaluate log-density.
+Affine coupling layers as in Dinh et al. (2017). Build a flow, draw samples, evaluate log-density.
 
 ```python
 import jax
