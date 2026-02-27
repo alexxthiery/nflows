@@ -78,20 +78,19 @@ JAX_ENABLE_X64=1 python -m pytest tests/ -v
 
 ## Known Issues
 
-Key items:
+No critical or high-priority issues open.
 
-- **C1**: LOFT inverse overflows for large inputs (`scalar_function.py:71`)
-- **C2**: LoftTransform + identity_gate breaks identity guarantee (LOFT not gated)
-- **C3**: No gradient correctness tests (log-det vs autodiff Jacobian)
-- **H2**: Inconsistent defaults between `.create()` and builders (`max_log_scale` 1.0 vs 5.0)
+Previously fixed:
+- **C1** (fixed `765a278`): LOFT inverse overflow, clamped exponent to 80.0
+- **C2** (fixed `765a278`): LoftTransform now supports `g_value` gating
+- **C3** (fixed `765a278`): `TestLogdetVsAutodiff` in `test_transforms.py` + spline autodiff tests
+- **H2** (fixed `d8446f2`): `max_log_scale` aligned to 5.0 across dataclass, `.create()`, and builders
 
 ## Gotchas
 
-- `identity_gate` single-sample contract: gate function receives `(context_dim,)`, not batched. `jax.vmap` handles batching. Writing a batch-aware gate silently produces wrong results.
+- `identity_gate` single-sample contract: gate function receives `(context_dim,)`, not batched. `jax.vmap` handles batching. Writing a batch-aware gate silently produces wrong results. Validated at build time via `jax.eval_shape`.
 - Raw context vs extracted: when using a feature extractor, the gate still gets raw context.
 - No `__init__.py` exports: must use `from nflows.builders import build_realnvp`.
-- `use_loft=True` (default) is incompatible with `identity_gate` (C2 above).
-- Builder `max_log_scale` default is 5.0, but `AffineCoupling.create()` default is 1.0.
 
 ## Documentation Map
 
